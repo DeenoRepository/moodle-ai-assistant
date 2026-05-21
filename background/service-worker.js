@@ -235,7 +235,9 @@ function buildUserPrompt(question, context) {
   }
 
   if (context) {
-    instructions.push("Use the provided context to inform your answer.");
+    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided context above.");
+    instructions.push("Do not use external knowledge. Do not rely on general facts. Use ONLY the information given in the context.");
+    instructions.push("If the context does not contain enough information to answer, state that clearly.");
   }
 
   sections.push(`## Instructions\n${instructions.join('\n')}`);

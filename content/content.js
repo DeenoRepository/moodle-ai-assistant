@@ -259,15 +259,27 @@
       const selects = formulation.querySelectorAll("select");
       const items = [];
       selects.forEach((select) => {
-        const row = select.closest("tr, div, li, .answer");
+        const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9, [class*='answer']");
         if (row) {
-          const rowText = row.innerText.replace(select.innerText, "").trim();
-          const options = [];
-          select.querySelectorAll("option").forEach((opt) => {
-            if (opt.value) options.push({ value: opt.value, text: opt.text.trim() });
-          });
-          if (rowText) {
-            items.push({ text: rowText, select, options });
+          const allText = row.innerText;
+          const selectText = select.innerText;
+          let rowText = allText.replace(selectText, "").trim();
+          
+          if (!rowText) {
+            const children = Array.from(row.childNodes);
+            const textParts = [];
+            children.forEach((child) => {
+              if (child.nodeType === Node.TEXT_NODE) {
+                textParts.push(child.textContent.trim());
+              } else if (child !== select && !child.querySelector || !select.contains(child)) {
+                textParts.push(child.innerText.trim());
+              }
+            });
+            rowText = textParts.filter(Boolean).join(' ').trim();
+          }
+          
+          if (rowText && rowText.length > 5) {
+            items.push({ text: rowText });
           }
         }
       });
