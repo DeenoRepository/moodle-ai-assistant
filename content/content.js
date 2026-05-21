@@ -616,10 +616,16 @@
             <div class="moodle-ai-context-indicators">
               ${contextStatus}
               ${imageStatus}
+              <button type="button" class="moodle-ai-view-log-btn" title="View full prompt and response">View Log</button>
             </div>
           </div>
           <div class="moodle-ai-answer-body">${response.answer.replace(/\n/g, "<br>")}</div>
         `;
+
+        const viewLogBtn = answerDiv.querySelector(".moodle-ai-view-log-btn");
+        if (viewLogBtn) {
+          viewLogBtn.addEventListener("click", () => showLogModal(response.prompt, response.answer));
+        }
 
         const { autofill } = await chrome.storage.sync.get(["autofill"]);
         if (autofill !== false) {
@@ -784,6 +790,55 @@
         console.warn("Failed to restore context:", e);
       }
     }
+  }
+
+  function showLogModal(prompt, answer) {
+    const existingModal = document.querySelector(".moodle-ai-log-modal");
+    if (existingModal) existingModal.remove();
+
+    const modal = document.createElement("div");
+    modal.className = "moodle-ai-log-modal";
+    
+    modal.innerHTML = `
+      <div class="moodle-ai-log-modal-content">
+        <div class="moodle-ai-log-modal-header">
+          <h3>AI Request Log</h3>
+          <button type="button" class="moodle-ai-log-close-btn">&times;</button>
+        </div>
+        <div class="moodle-ai-log-tabs">
+          <button type="button" class="moodle-ai-log-tab active" data-tab="prompt">Prompt</button>
+          <button type="button" class="moodle-ai-log-tab" data-tab="response">Response</button>
+        </div>
+        <div class="moodle-ai-log-body">
+          <div class="moodle-ai-log-tab-content active" data-tab="prompt">
+            <pre>${escapeHtml(prompt)}</pre>
+          </div>
+          <div class="moodle-ai-log-tab-content" data-tab="response">
+            <pre>${escapeHtml(answer)}</pre>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    modal.querySelector(".moodle-ai-log-close-btn").addEventListener("click", () => modal.remove());
+    modal.addEventListener("click", (e) => { if (e.target === modal) modal.remove(); });
+
+    modal.querySelectorAll(".moodle-ai-log-tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        modal.querySelectorAll(".moodle-ai-log-tab").forEach((t) => t.classList.remove("active"));
+        modal.querySelectorAll(".moodle-ai-log-tab-content").forEach((c) => c.classList.remove("active"));
+        tab.classList.add("active");
+        modal.querySelector(`.moodle-ai-log-tab-content[data-tab="${tab.dataset.tab}"]`).classList.add("active");
+      });
+    });
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   const observer = new MutationObserver((mutations) => {

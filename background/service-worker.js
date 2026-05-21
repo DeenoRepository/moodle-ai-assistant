@@ -75,7 +75,7 @@ async function handleGetAnswer(question, context, contextImages, sessionId) {
 
     await saveHistory(sessionId, history);
 
-    return { answer, historyCount: Math.floor(history.messages.length / 2) };
+    return { answer, historyCount: Math.floor(history.messages.length / 2), prompt: userPrompt };
   } catch (err) {
     return { error: `Network error: ${err.message}` };
   }
