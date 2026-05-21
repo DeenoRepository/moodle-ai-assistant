@@ -25,7 +25,8 @@ async function handleGetAnswer(question, context, contextImages, sessionId) {
   const history = await getOrCreateHistory(sessionId, context, contextImages);
 
   const isFirstMessage = history.messages.length === 0;
-  const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null);
+  const hasImages = isFirstMessage && contextImages && contextImages.length > 0;
+  const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null, hasImages);
   
   const parts = [{ text: userPrompt }];
   
@@ -165,11 +166,15 @@ async function getHistoryInfo(sessionId) {
   return { count: 0, hasContext: false, hasMedia: false };
 }
 
-function buildUserPrompt(question, context) {
+function buildUserPrompt(question, context, hasImages) {
   const sections = [];
 
   if (context) {
     sections.push(`## Context\n${context}`);
+  }
+
+  if (hasImages) {
+    sections.push(`## Context Images\nThe following images are provided as part of the context. Analyze them carefully along with the text context above.`);
   }
 
   sections.push(`## Question Type\n${question.type}`);
@@ -234,13 +239,16 @@ function buildUserPrompt(question, context) {
       instructions.push("Provide the most accurate answer possible.");
   }
 
-  if (context) {
-    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided Context section above.");
+  if (context || hasImages) {
+    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided Context section and Context Images above.");
     instructions.push("Do NOT use external knowledge, general facts, or assumptions.");
-    instructions.push("Step 1: Check if the Context contains information relevant to answering the Question.");
+    instructions.push("Step 1: Check if the Context (text and images) contains information relevant to answering the Question.");
     instructions.push("Step 2: If the Context is relevant, use it to determine the correct answer.");
     instructions.push("Step 3: If the Context does NOT contain relevant information, respond with: 'Context does not contain information to answer this question.'");
     instructions.push("NEVER guess or use outside knowledge.");
+    if (hasImages) {
+      instructions.push("IMPORTANT: The context images may contain crucial information needed to answer the question. Analyze them carefully.");
+    }
   }
 
   sections.push(`## Instructions\n${instructions.join('\n')}`);
