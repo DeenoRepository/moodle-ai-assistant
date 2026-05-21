@@ -412,42 +412,75 @@
         .map((l) => l.trim())
         .filter(Boolean);
 
-      const orderMap = new Map();
+      const orderedItems = [];
       answerLines.forEach((line) => {
         const match = line.match(/^(\d+)[\.\):\s-]+(.+)$/);
         if (match) {
-          orderMap.set(match[2].trim().toLowerCase(), match[1]);
+          orderedItems.push({ position: match[1], text: match[2].trim().toLowerCase() });
+        } else if (line) {
+          orderedItems.push({ position: null, text: line.toLowerCase() });
         }
       });
 
-      if (orderMap.size === 0) {
-        answerLines.forEach((line, index) => {
-          orderMap.set(line.toLowerCase(), String(index + 1));
+      if (orderedItems.length > 0 && !orderedItems[0].position) {
+        orderedItems.forEach((item, index) => {
+          item.position = String(index + 1);
         });
       }
 
       const selects = formulation.querySelectorAll("select");
-      selects.forEach((select) => {
-        const row = select.closest("tr, div, li, .answer");
+      
+      selects.forEach((select, selectIndex) => {
+        const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9");
         if (!row) return;
 
         const rowText = row.innerText.replace(select.innerText, "").trim().toLowerCase();
-
-        let orderValue = null;
-        for (const [itemText, order] of orderMap) {
-          if (rowText.includes(itemText) || itemText.includes(rowText)) {
-            orderValue = order;
+        
+        let targetPosition = null;
+        
+        for (const item of orderedItems) {
+          const cleanItemText = item.text.replace(/^\d+[\.\):\s-]+/, "").trim();
+          const cleanRowText = rowText.replace(/^\d+[\.\):\s-]+/, "").trim();
+          
+          if (cleanRowText && cleanItemText && (
+              cleanRowText.includes(cleanItemText) || 
+              cleanItemText.includes(cleanRowText) ||
+              rowText.includes(item.text) || 
+              item.text.includes(rowText))) {
+            targetPosition = item.position;
             break;
           }
         }
 
-        if (orderValue) {
+        if (!targetPosition && selectIndex < orderedItems.length) {
+          targetPosition = orderedItems[selectIndex].position;
+        }
+
+        if (targetPosition) {
           const options = select.querySelectorAll("option");
+          let matched = false;
+          
           for (const option of options) {
-            if (option.text.trim() === orderValue || option.value === orderValue) {
+            const optText = option.text.trim();
+            const optValue = option.value.trim();
+            
+            if (optText === targetPosition || optValue === targetPosition ||
+                optText === String(targetPosition) || optValue === String(targetPosition)) {
               select.value = option.value;
               select.dispatchEvent(new Event("change", { bubbles: true }));
+              matched = true;
               break;
+            }
+          }
+          
+          if (!matched && options.length > 0) {
+            const positionNum = parseInt(targetPosition);
+            if (positionNum > 0 && positionNum <= options.length) {
+              const option = options[positionNum - 1];
+              if (option && option.value) {
+                select.value = option.value;
+                select.dispatchEvent(new Event("change", { bubbles: true }));
+              }
             }
           }
         }
