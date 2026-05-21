@@ -210,12 +210,30 @@
 
     if (type.includes("Multiple Choice") || type === "True/False") {
       const options = [];
-      const labels = formulation.querySelectorAll(".answer .label, .flex-fill, .col-md-9, [class*='answer']");
-      labels.forEach((label) => {
-        const text = label.innerText.trim();
-        if (text && text.length > 1) {
-          options.push(text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim());
-        }
+      
+      const labelSelectors = [
+        ".answer .label",
+        ".flex-fill",
+        ".col-md-9",
+        "[class*='answer']",
+        ".formulation label",
+        ".que label",
+        "label[for*='answer']",
+        "label[for*='choice']",
+        ".answer .content",
+        ".answer .text"
+      ];
+      
+      labelSelectors.forEach((selector) => {
+        formulation.querySelectorAll(selector).forEach((label) => {
+          const text = label.innerText.trim();
+          if (text && text.length > 1) {
+            const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)|^\d+[\.\)\s-]+/gi, '').trim();
+            if (cleanText && !options.includes(cleanText)) {
+              options.push(cleanText);
+            }
+          }
+        });
       });
 
       if (options.length === 0) {
@@ -224,14 +242,27 @@
           const label = input.closest("label") || formulation.querySelector(`label[for="${input.id}"]`);
           if (label) {
             const labelText = label.innerText.trim().replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
-            if (labelText && labelText.length > 1) {
+            if (labelText && labelText.length > 1 && !options.includes(labelText)) {
               options.push(labelText);
             }
           }
         });
       }
 
-      data.options = options.filter((opt, index, self) => self.indexOf(opt) === index);
+      if (options.length === 0) {
+        const allLabels = formulation.querySelectorAll("label");
+        allLabels.forEach((label) => {
+          const text = label.innerText.trim();
+          if (text && text.length > 3 && text.length < 500) {
+            const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
+            if (cleanText && !options.includes(cleanText)) {
+              options.push(cleanText);
+            }
+          }
+        });
+      }
+
+      data.options = options;
     }
 
     if (type === "Matching") {
@@ -450,7 +481,7 @@
         const match = line.match(/^(\d+)[\.\):\s-]+(.+)$/);
         if (match) {
           foundFirstNumbered = true;
-          orderedItems.push({ position: match[1], text: match[2].trim() });
+          orderedItems.push({ position: parseInt(match[1]), text: match[2].trim() });
         } else if (!foundFirstNumbered) {
           // Skip introductory text before first numbered item
         }
@@ -459,7 +490,7 @@
       if (orderedItems.length === 0) {
         answerLines.forEach((line, index) => {
           if (line && !line.toLowerCase().includes("statement") && !line.toLowerCase().includes("based on")) {
-            orderedItems.push({ position: String(index + 1), text: line });
+            orderedItems.push({ position: index + 1, text: line });
           }
         });
       }
@@ -474,13 +505,13 @@
         
         let targetPosition = null;
         
-        for (const item of orderedItems) {
-          const itemText = item.text.toLowerCase().replace(/[^\w\s]/g, '');
+        for (let i = 0; i < orderedItems.length; i++) {
+          const aiItemText = orderedItems[i].text.toLowerCase().replace(/[^\w\s]/g, '');
           const rowTextClean = rowText.toLowerCase().replace(/[^\w\s]/g, '');
           
-          const similarity = calculateSimilarity(itemText, rowTextClean);
-          if (similarity > 0.6) {
-            targetPosition = item.position;
+          const similarity = calculateSimilarity(aiItemText, rowTextClean);
+          if (similarity > 0.5) {
+            targetPosition = orderedItems[i].position;
             break;
           }
         }
@@ -497,8 +528,7 @@
             const optText = option.text.trim();
             const optValue = option.value.trim();
             
-            if (optText === targetPosition || optValue === targetPosition ||
-                optText === String(targetPosition) || optValue === String(targetPosition)) {
+            if (optText === String(targetPosition) || optValue === String(targetPosition)) {
               select.value = option.value;
               select.dispatchEvent(new Event("change", { bubbles: true }));
               matched = true;
