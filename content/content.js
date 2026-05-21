@@ -210,54 +210,82 @@
 
     if (type.includes("Multiple Choice") || type === "True/False") {
       const options = [];
+      const seenTexts = new Set();
       
-      const labelSelectors = [
-        ".answer .label",
-        ".flex-fill",
-        ".col-md-9",
-        "[class*='answer']",
-        ".formulation label",
-        ".que label",
-        "label[for*='answer']",
-        "label[for*='choice']",
-        ".answer .content",
-        ".answer .text"
-      ];
+      const addOption = (text) => {
+        const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)|^\d+[\.\)\s-]+/gi, '').trim();
+        if (cleanText && cleanText.length > 1 && !seenTexts.has(cleanText)) {
+          seenTexts.add(cleanText);
+          options.push(cleanText);
+        }
+      };
       
-      labelSelectors.forEach((selector) => {
-        formulation.querySelectorAll(selector).forEach((label) => {
-          const text = label.innerText.trim();
-          if (text && text.length > 1) {
-            const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)|^\d+[\.\)\s-]+/gi, '').trim();
-            if (cleanText && !options.includes(cleanText)) {
-              options.push(cleanText);
-            }
-          }
-        });
-      });
-
-      if (options.length === 0) {
-        const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
-        inputs.forEach((input) => {
-          const label = input.closest("label") || formulation.querySelector(`label[for="${input.id}"]`);
+      // Strategy 1: Find individual answer containers (.answer divs/rows)
+      const answerContainers = formulation.querySelectorAll(".answer, .que .content, .flex-container, .d-flex");
+      if (answerContainers.length > 0) {
+        answerContainers.forEach((container) => {
+          // Skip if this container contains other answer containers (avoid nesting)
+          const childAnswers = container.querySelectorAll(".answer");
+          if (childAnswers.length > 0 && container !== formulation) return;
+          
+          const label = container.querySelector("label");
           if (label) {
-            const labelText = label.innerText.trim().replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
-            if (labelText && labelText.length > 1 && !options.includes(labelText)) {
-              options.push(labelText);
+            addOption(label.innerText);
+          } else {
+            const text = container.innerText.trim();
+            if (text && text.length < 300) {
+              addOption(text);
             }
           }
         });
       }
-
+      
+      // Strategy 2: Find radio/checkbox inputs and their associated labels
+      if (options.length === 0) {
+        const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+        inputs.forEach((input) => {
+          let label = input.closest("label");
+          if (!label) {
+            label = formulation.querySelector(`label[for="${input.id}"]`);
+          }
+          if (!label) {
+            const parent = input.parentElement;
+            if (parent && parent.tagName === "LABEL") {
+              label = parent;
+            }
+          }
+          if (label) {
+            addOption(label.innerText);
+          }
+        });
+      }
+      
+      // Strategy 3: Fallback to specific label selectors
+      if (options.length === 0) {
+        const fallbackSelectors = [
+          ".answer .label",
+          ".answer .content",
+          ".answer .text",
+          ".que label",
+          "label[for*='answer']",
+          "label[for*='choice']"
+        ];
+        
+        fallbackSelectors.forEach((selector) => {
+          formulation.querySelectorAll(selector).forEach((el) => {
+            addOption(el.innerText);
+          });
+        });
+      }
+      
+      // Strategy 4: Last resort - all labels, but filter carefully
       if (options.length === 0) {
         const allLabels = formulation.querySelectorAll("label");
         allLabels.forEach((label) => {
           const text = label.innerText.trim();
-          if (text && text.length > 3 && text.length < 500) {
-            const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
-            if (cleanText && !options.includes(cleanText)) {
-              options.push(cleanText);
-            }
+          // Only accept short labels (likely option text, not question text)
+          if (text && text.length > 1 && text.length < 200) {
+            addOption(text);
           }
         });
       }
