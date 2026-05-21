@@ -217,13 +217,15 @@ function buildUserPrompt(question, context) {
       instructions.push("Format: 'Item: Match' on separate lines.");
       break;
     case "Ordering":
-      instructions.push("You will be given a list of statements that need to be arranged in the correct logical/chronological order.");
-      instructions.push("IMPORTANT: Return ONLY the position numbers (1, 2, 3, etc.) for each statement in the order they should appear.");
-      instructions.push("Format your answer as:");
-      instructions.push("1. [exact text of first statement]");
-      instructions.push("2. [exact text of second statement]");
-      instructions.push("etc.");
-      instructions.push("DO NOT add new text or modify the statements. Use the EXACT text provided.");
+      instructions.push("CRITICAL: Return ONLY the numbered list of statements in correct order.");
+      instructions.push("DO NOT include any introductory text like 'Based on...', 'The correct order is...', etc.");
+      instructions.push("DO NOT include any explanations or reasoning.");
+      instructions.push("Start your response directly with '1. ' followed by the first statement.");
+      instructions.push("Format:");
+      instructions.push("1. [exact text of statement that goes first]");
+      instructions.push("2. [exact text of statement that goes second]");
+      instructions.push("3. [etc.]");
+      instructions.push("Use the EXACT text from the statements provided. Do not modify or paraphrase.");
       break;
     default:
       instructions.push("Provide the most accurate answer possible.");

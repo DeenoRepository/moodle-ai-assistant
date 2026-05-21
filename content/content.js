@@ -431,18 +431,23 @@
         .filter(Boolean);
 
       const orderedItems = [];
+      let foundFirstNumbered = false;
+      
       answerLines.forEach((line) => {
         const match = line.match(/^(\d+)[\.\):\s-]+(.+)$/);
         if (match) {
+          foundFirstNumbered = true;
           orderedItems.push({ position: match[1], text: match[2].trim() });
-        } else if (line && !line.toLowerCase().includes("statement")) {
-          orderedItems.push({ position: null, text: line });
+        } else if (!foundFirstNumbered) {
+          // Skip introductory text before first numbered item
         }
       });
 
-      if (orderedItems.length > 0 && !orderedItems[0].position) {
-        orderedItems.forEach((item, index) => {
-          item.position = String(index + 1);
+      if (orderedItems.length === 0) {
+        answerLines.forEach((line, index) => {
+          if (line && !line.toLowerCase().includes("statement") && !line.toLowerCase().includes("based on")) {
+            orderedItems.push({ position: String(index + 1), text: line });
+          }
         });
       }
 
@@ -461,7 +466,7 @@
           const rowTextClean = rowText.toLowerCase().replace(/[^\w\s]/g, '');
           
           const similarity = calculateSimilarity(itemText, rowTextClean);
-          if (similarity > 0.7) {
+          if (similarity > 0.6) {
             targetPosition = item.position;
             break;
           }
