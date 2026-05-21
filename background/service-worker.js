@@ -187,7 +187,7 @@ function buildUserPrompt(question, context) {
   }
 
   if (question.orderingItems && question.orderingItems.length > 0) {
-    sections.push(`## Statements to Order\n${question.orderingItems.map((item, i) => `${i + 1}. ${item.text}`).join('\n')}`);
+    sections.push(`## Statements to Order (arrange these in correct order):\n${question.orderingItems.map((item, i) => `Statement ${i + 1}: ${item.text}`).join('\n')}`);
   }
 
   const instructions = [];
@@ -217,8 +217,13 @@ function buildUserPrompt(question, context) {
       instructions.push("Format: 'Item: Match' on separate lines.");
       break;
     case "Ordering":
-      instructions.push("Arrange all statements in the correct logical order.");
-      instructions.push("Format: '1. [statement]', '2. [statement]', etc.");
+      instructions.push("You will be given a list of statements that need to be arranged in the correct logical/chronological order.");
+      instructions.push("IMPORTANT: Return ONLY the position numbers (1, 2, 3, etc.) for each statement in the order they should appear.");
+      instructions.push("Format your answer as:");
+      instructions.push("1. [exact text of first statement]");
+      instructions.push("2. [exact text of second statement]");
+      instructions.push("etc.");
+      instructions.push("DO NOT add new text or modify the statements. Use the EXACT text provided.");
       break;
     default:
       instructions.push("Provide the most accurate answer possible.");

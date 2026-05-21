@@ -276,6 +276,24 @@
     return data;
   }
 
+  function calculateSimilarity(str1, str2) {
+    if (!str1 || !str2) return 0;
+    
+    const words1 = str1.split(/\s+/).filter(Boolean);
+    const words2 = str2.split(/\s+/).filter(Boolean);
+    
+    if (words1.length === 0 || words2.length === 0) return 0;
+    
+    let matches = 0;
+    words1.forEach(word1 => {
+      if (words2.some(word2 => word2.includes(word1) || word1.includes(word2))) {
+        matches++;
+      }
+    });
+    
+    return matches / Math.max(words1.length, words2.length);
+  }
+
   function autoFillAnswer(formulation, answer, questionType) {
     const normalizedAnswer = answer.trim().toLowerCase();
 
@@ -416,9 +434,9 @@
       answerLines.forEach((line) => {
         const match = line.match(/^(\d+)[\.\):\s-]+(.+)$/);
         if (match) {
-          orderedItems.push({ position: match[1], text: match[2].trim().toLowerCase() });
-        } else if (line) {
-          orderedItems.push({ position: null, text: line.toLowerCase() });
+          orderedItems.push({ position: match[1], text: match[2].trim() });
+        } else if (line && !line.toLowerCase().includes("statement")) {
+          orderedItems.push({ position: null, text: line });
         }
       });
 
@@ -429,24 +447,22 @@
       }
 
       const selects = formulation.querySelectorAll("select");
+      const originalStatements = question.orderingItems || [];
       
       selects.forEach((select, selectIndex) => {
         const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9");
         if (!row) return;
 
-        const rowText = row.innerText.replace(select.innerText, "").trim().toLowerCase();
+        const rowText = row.innerText.replace(select.innerText, "").trim();
         
         let targetPosition = null;
         
         for (const item of orderedItems) {
-          const cleanItemText = item.text.replace(/^\d+[\.\):\s-]+/, "").trim();
-          const cleanRowText = rowText.replace(/^\d+[\.\):\s-]+/, "").trim();
+          const itemText = item.text.toLowerCase().replace(/[^\w\s]/g, '');
+          const rowTextClean = rowText.toLowerCase().replace(/[^\w\s]/g, '');
           
-          if (cleanRowText && cleanItemText && (
-              cleanRowText.includes(cleanItemText) || 
-              cleanItemText.includes(cleanRowText) ||
-              rowText.includes(item.text) || 
-              item.text.includes(rowText))) {
+          const similarity = calculateSimilarity(itemText, rowTextClean);
+          if (similarity > 0.7) {
             targetPosition = item.position;
             break;
           }
