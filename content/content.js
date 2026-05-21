@@ -447,7 +447,6 @@
       }
 
       const selects = formulation.querySelectorAll("select");
-      const originalStatements = question.orderingItems || [];
       
       selects.forEach((select, selectIndex) => {
         const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9");
