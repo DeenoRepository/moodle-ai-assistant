@@ -1,0 +1,169 @@
+.moodle-ai-btn-wrapper {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.moodle-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: linear-gradient(135deg, #4285f4, #34a853);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.moodle-ai-context-btn {
+  background: linear-gradient(135deg, #6c757d, #495057);
+}
+
+.moodle-ai-context-btn:hover {
+  background: linear-gradient(135deg, #5a6268, #3d4247);
+}
+
+.moodle-ai-context-btn-active {
+  background: linear-gradient(135deg, #28a745, #218838) !important;
+}
+
+.moodle-ai-context-active {
+  border-left: 4px solid #28a745 !important;
+  background: rgba(40, 167, 69, 0.05) !important;
+}
+
+.moodle-ai-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.moodle-ai-btn:active {
+  transform: translateY(0);
+}
+
+.moodle-ai-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.moodle-ai-answer {
+  margin: 10px 0;
+  padding: 12px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  display: none;
+}
+
+.moodle-ai-answer-loading {
+  display: block;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  color: #856404;
+}
+
+.moodle-ai-answer-success {
+  display: block;
+  background: #d4edda;
+  border: 1px solid #28a745;
+  color: #155724;
+}
+
+.moodle-ai-answer-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.moodle-ai-context-indicators {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.moodle-ai-context-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #856404;
+  font-weight: 500;
+}
+
+.moodle-ai-context-status-none {
+  background: #f8f9fa;
+  border-color: #dee2e6;
+  color: #6c757d;
+}
+
+.moodle-ai-answer-body {
+  line-height: 1.5;
+}
+
+.moodle-ai-answer-error {
+  display: block;
+  background: #f8d7da;
+  border: 1px solid #dc3545;
+  color: #721c24;
+}
+
+.moodle-ai-history-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  background: #e8f5e9;
+  border: 1px solid #4caf50;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #2e7d32;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  align-self: center;
+}
+
+.moodle-ai-history-badge:hover {
+  background: #c8e6c9;
+  border-color: #388e3c;
+}
+
+.moodle-ai-context-media-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: #fff3e0;
+  border: 1px solid #ff9800;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #e65100;
+  margin-left: 8px;
+}
+
+.moodle-ai-context-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: #e3f2fd;
+  border: 1px solid #2196f3;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #1565c0;
+  font-weight: 500;
+  align-self: center;
+  margin-left: 8px;
+}
