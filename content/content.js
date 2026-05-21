@@ -9,7 +9,7 @@
   let activeContextImageCount = 0;
 
   function getSessionId() {
-    return window.location.origin + window.location.pathname;
+    return window.location.origin + window.location.pathname + window.location.search;
   }
 
   function extractMediaFromElement(element) {
