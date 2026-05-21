@@ -318,34 +318,74 @@
     }
 
     if (type === "Ordering") {
-      const selects = formulation.querySelectorAll("select");
       const items = [];
-      selects.forEach((select) => {
-        const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9, [class*='answer']");
-        if (row) {
+      
+      // Strategy 1: Table-based layout (most common in Moodle)
+      const rows = formulation.querySelectorAll("tr");
+      rows.forEach((row) => {
+        const select = row.querySelector("select");
+        if (!select) return;
+        
+        const cells = row.querySelectorAll("td, th");
+        let statementText = "";
+        
+        cells.forEach((cell) => {
+          if (!cell.contains(select)) {
+            const text = cell.innerText.trim();
+            if (text && text.length > 3) {
+              statementText = text;
+            }
+          }
+        });
+        
+        if (!statementText) {
           const allText = row.innerText;
-          const selectText = select.innerText;
-          let rowText = allText.replace(selectText, "").trim();
+          const selectOptionsText = Array.from(select.querySelectorAll("option"))
+            .map(opt => opt.text.trim())
+            .join(" ");
+          statementText = allText.replace(selectOptionsText, "").trim();
+        }
+        
+        if (statementText && statementText.length > 3) {
+          items.push({ text: statementText });
+        }
+      });
+      
+      // Strategy 2: Non-table layout (divs, lists)
+      if (items.length === 0) {
+        const selects = formulation.querySelectorAll("select");
+        selects.forEach((select) => {
+          const row = select.closest("div, li, .answer, .flex-fill, .col-md-9, [class*='answer']");
+          if (!row) return;
           
-          if (!rowText) {
+          const selectOptionsText = Array.from(select.querySelectorAll("option"))
+            .map(opt => opt.text.trim())
+            .join(" ");
+          
+          const allText = row.innerText;
+          let statementText = allText.replace(selectOptionsText, "").trim();
+          
+          if (!statementText) {
             const children = Array.from(row.childNodes);
             const textParts = [];
             children.forEach((child) => {
               if (child.nodeType === Node.TEXT_NODE) {
                 textParts.push(child.textContent.trim());
-              } else if (child !== select && !child.querySelector || !select.contains(child)) {
+              } else if (child !== select && !select.contains(child)) {
                 textParts.push(child.innerText.trim());
               }
             });
-            rowText = textParts.filter(Boolean).join(' ').trim();
+            statementText = textParts.filter(Boolean).join(" ").trim();
           }
           
-          if (rowText && rowText.length > 5) {
-            items.push({ text: rowText });
+          if (statementText && statementText.length > 3) {
+            items.push({ text: statementText });
           }
-        }
-      });
+        });
+      }
+      
       data.orderingItems = items;
+      console.log("[Moodle AI] Extracted ordering items:", items.map(i => i.text.substring(0, 50)));
     }
 
     return data;
