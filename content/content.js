@@ -201,6 +201,7 @@
     questionText = questionText
       .replace(/\s+/g, ' ')
       .replace(/AI Answer|Set Context|Clear Context/gi, '')
+      .replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '')
       .trim();
 
     const type = detectQuestionType(formulation);
@@ -213,7 +214,7 @@
       labels.forEach((label) => {
         const text = label.innerText.trim();
         if (text && text.length > 1) {
-          options.push(text);
+          options.push(text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim());
         }
       });
 
@@ -222,7 +223,7 @@
         inputs.forEach((input) => {
           const label = input.closest("label") || formulation.querySelector(`label[for="${input.id}"]`);
           if (label) {
-            const labelText = label.innerText.trim();
+            const labelText = label.innerText.trim().replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
             if (labelText && labelText.length > 1) {
               options.push(labelText);
             }

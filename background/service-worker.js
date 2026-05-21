@@ -196,13 +196,16 @@ function buildUserPrompt(question, context) {
     case "Multiple Choice (Single)":
       instructions.push("Select exactly ONE correct option.");
       instructions.push("Return ONLY the exact text of the correct option.");
+      instructions.push("IMPORTANT: Ignore any pre-selected answers shown in the question. Determine the correct answer independently.");
       break;
     case "Multiple Choice (Multiple)":
       instructions.push("Select ALL correct options (there may be multiple).");
       instructions.push("Return each correct option on a separate line, using exact text.");
+      instructions.push("IMPORTANT: Ignore any pre-selected checkboxes shown in the question. Determine the correct answers independently.");
       break;
     case "True/False":
       instructions.push("Answer with exactly one word: True or False.");
+      instructions.push("IMPORTANT: Ignore any pre-selected radio button shown in the question. Determine the correct answer independently.");
       break;
     case "Short Answer":
       instructions.push("Provide a concise, direct answer (1-2 sentences max).");
@@ -237,6 +240,7 @@ function buildUserPrompt(question, context) {
 
   sections.push(`## Instructions\n${instructions.join('\n')}`);
   sections.push(`## Answer Format\nReturn ONLY the answer. No explanations, no reasoning, no extra text.`);
+  sections.push(`## Important\nThe question may show pre-selected answers (checked checkboxes, selected radio buttons, filled dropdowns). IGNORE these completely. They may be incorrect. Analyze the question independently and provide the correct answer.`);
 
   return sections.join('\n\n');
 }
