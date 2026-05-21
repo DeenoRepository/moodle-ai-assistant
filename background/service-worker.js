@@ -235,9 +235,12 @@ function buildUserPrompt(question, context) {
   }
 
   if (context) {
-    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided context above.");
-    instructions.push("Do not use external knowledge. Do not rely on general facts. Use ONLY the information given in the context.");
-    instructions.push("If the context does not contain enough information to answer, state that clearly.");
+    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided Context section above.");
+    instructions.push("Do NOT use external knowledge, general facts, or assumptions.");
+    instructions.push("Step 1: Check if the Context contains information relevant to answering the Question.");
+    instructions.push("Step 2: If the Context is relevant, use it to determine the correct answer.");
+    instructions.push("Step 3: If the Context does NOT contain relevant information, respond with: 'Context does not contain information to answer this question.'");
+    instructions.push("NEVER guess or use outside knowledge.");
   }
 
   sections.push(`## Instructions\n${instructions.join('\n')}`);

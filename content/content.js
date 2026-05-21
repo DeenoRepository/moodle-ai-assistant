@@ -213,60 +213,62 @@
       const seenTexts = new Set();
       
       const addOption = (text) => {
-        const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)|^\d+[\.\)\s-]+/gi, '').trim();
-        if (cleanText && cleanText.length > 1 && !seenTexts.has(cleanText)) {
-          seenTexts.add(cleanText);
-          options.push(cleanText);
+        const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
+        const withoutNumber = cleanText.replace(/^\d+[\.\)\s-]+/, '').trim();
+        if (withoutNumber && withoutNumber.length > 1 && !seenTexts.has(withoutNumber)) {
+          seenTexts.add(withoutNumber);
+          options.push(withoutNumber);
         }
       };
       
-      // Strategy 1: Find individual answer containers (.answer divs/rows)
-      const answerContainers = formulation.querySelectorAll(".answer, .que .content, .flex-container, .d-flex");
-      if (answerContainers.length > 0) {
+      // Strategy 1: Direct radio/checkbox inputs with their labels (most reliable)
+      const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+      inputs.forEach((input) => {
+        // Try closest label first
+        let label = input.closest("label");
+        // Try label[for="inputId"]
+        if (!label && input.id) {
+          label = formulation.querySelector(`label[for="${input.id}"]`);
+        }
+        // Try parent element if it's a label
+        if (!label && input.parentElement && input.parentElement.tagName === "LABEL") {
+          label = input.parentElement;
+        }
+        // Try sibling label
+        if (!label) {
+          label = input.nextElementSibling;
+          if (label && label.tagName !== "LABEL") label = null;
+        }
+        
+        if (label) {
+          addOption(label.innerText);
+        }
+      });
+      
+      // Strategy 2: .answer containers with direct text or label
+      if (options.length === 0) {
+        const answerContainers = formulation.querySelectorAll(".que .answer, .formulation .answer");
         answerContainers.forEach((container) => {
-          // Skip if this container contains other answer containers (avoid nesting)
-          const childAnswers = container.querySelectorAll(".answer");
-          if (childAnswers.length > 0 && container !== formulation) return;
-          
           const label = container.querySelector("label");
           if (label) {
             addOption(label.innerText);
           } else {
             const text = container.innerText.trim();
-            if (text && text.length < 300) {
+            if (text && text.length < 300 && text.length > 1) {
               addOption(text);
             }
           }
         });
       }
       
-      // Strategy 2: Find radio/checkbox inputs and their associated labels
-      if (options.length === 0) {
-        const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
-        inputs.forEach((input) => {
-          let label = input.closest("label");
-          if (!label) {
-            label = formulation.querySelector(`label[for="${input.id}"]`);
-          }
-          if (!label) {
-            const parent = input.parentElement;
-            if (parent && parent.tagName === "LABEL") {
-              label = parent;
-            }
-          }
-          if (label) {
-            addOption(label.innerText);
-          }
-        });
-      }
-      
-      // Strategy 3: Fallback to specific label selectors
+      // Strategy 3: Specific label selectors within answer areas
       if (options.length === 0) {
         const fallbackSelectors = [
+          ".que .answer label",
+          ".formulation .answer label",
           ".answer .label",
           ".answer .content",
           ".answer .text",
-          ".que label",
           "label[for*='answer']",
           "label[for*='choice']"
         ];
@@ -278,19 +280,20 @@
         });
       }
       
-      // Strategy 4: Last resort - all labels, but filter carefully
+      // Strategy 4: Last resort - all labels, filter by length and exclude question text
       if (options.length === 0) {
         const allLabels = formulation.querySelectorAll("label");
+        const questionText = formulation.querySelector(".qtext, .questiontext")?.innerText.trim() || "";
         allLabels.forEach((label) => {
           const text = label.innerText.trim();
-          // Only accept short labels (likely option text, not question text)
-          if (text && text.length > 1 && text.length < 200) {
+          if (text && text.length > 1 && text.length < 200 && text !== questionText) {
             addOption(text);
           }
         });
       }
 
       data.options = options;
+      console.log("[Moodle AI] Extracted options:", options);
     }
 
     if (type === "Matching") {
