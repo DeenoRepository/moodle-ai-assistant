@@ -290,3 +290,30 @@
   max-height: 50vh;
   overflow: auto;
 }
+
+.latex-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: middle;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.latex-num {
+  border-bottom: 1px solid currentColor;
+  padding-bottom: 1px;
+  font-size: 0.85em;
+  text-align: center;
+}
+
+.latex-den {
+  font-size: 0.85em;
+  text-align: center;
+}
+
+.moodle-ai-formula {
+  font-family: "Cambria Math", "Times New Roman", serif;
+  font-style: italic;
+  padding: 0 2px;
+}

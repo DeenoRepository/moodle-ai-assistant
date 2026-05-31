@@ -2,7 +2,13 @@ const conversationHistories = {};
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "getAnswer") {
-    handleGetAnswer(request.question, request.context, request.contextImages, request.sessionId).then(sendResponse);
+    handleGetAnswer(
+      request.question,
+      request.questionImageUrls || [],
+      request.context,
+      request.contextImageUrls || [],
+      request.sessionId
+    ).then(sendResponse);
     return true;
   }
   if (request.action === "clearHistory") {
@@ -15,23 +21,81 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-async function handleGetAnswer(question, context, contextImages, sessionId) {
+// Helper function to fetch images in background to bypass content script CORS issues
+async function fetchImageAsBase64(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    const buffer = await blob.arrayBuffer();
+    
+    // Convert arrayBuffer to base64
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64Data = btoa(binary);
+    
+    return {
+      mimeType: blob.type || "image/jpeg",
+      data: base64Data
+    };
+  } catch (error) {
+    console.error(`Failed to fetch image from ${url}:`, error);
+    return null;
+  }
+}
+
+async function handleGetAnswer(question, questionImageUrls, context, contextImageUrls, sessionId) {
   const { apiKey, model } = await chrome.storage.sync.get(["apiKey", "model"]);
   if (!apiKey) {
     return { error: "API key not set. Please configure it in the extension popup." };
   }
 
   const selectedModel = model || "gemini-2.0-flash";
-  const history = await getOrCreateHistory(sessionId, context, contextImages);
+  const history = await getOrCreateHistory(sessionId, context, contextImageUrls);
 
   const isFirstMessage = history.messages.length === 0;
-  const hasImages = isFirstMessage && contextImages && contextImages.length > 0;
-  const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null, hasImages);
+
+  // Resolve images in background
+  const questionImages = [];
+  for (const url of questionImageUrls) {
+    const imgData = await fetchImageAsBase64(url);
+    if (imgData) questionImages.push(imgData);
+  }
+
+  const contextImages = [];
+  if (isFirstMessage) {
+    for (const url of contextImageUrls) {
+      const imgData = await fetchImageAsBase64(url);
+      if (imgData) contextImages.push(imgData);
+    }
+  }
+
+  const hasContextImages = contextImages.length > 0;
+  const hasQuestionImages = questionImages.length > 0;
+
+  const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null, hasContextImages, hasQuestionImages);
   
   const parts = [{ text: userPrompt }];
   
-  if (isFirstMessage && contextImages && contextImages.length > 0) {
+  // Attach context images on first message
+  if (isFirstMessage && hasContextImages) {
     contextImages.forEach((img) => {
+      parts.push({
+        inline_data: {
+          mime_type: img.mimeType,
+          data: img.data
+        }
+      });
+    });
+  }
+
+  // Attach question images for this specific question
+  if (hasQuestionImages) {
+    questionImages.forEach((img) => {
       parts.push({
         inline_data: {
           mime_type: img.mimeType,
@@ -61,8 +125,14 @@ async function handleGetAnswer(question, context, contextImages, sessionId) {
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      return { error: `Gemini API error: ${errorData.error?.message || response.statusText}` };
+      let errorMsg = response.statusText;
+      try {
+        const errorData = await response.json();
+        if (errorData.error?.message) {
+          errorMsg = errorData.error.message;
+        }
+      } catch (_) {}
+      return { error: `Gemini API error: ${errorMsg}` };
     }
 
     const data = await response.json();
@@ -76,20 +146,25 @@ async function handleGetAnswer(question, context, contextImages, sessionId) {
 
     await saveHistory(sessionId, history);
 
-    return { answer, historyCount: Math.floor(history.messages.length / 2), prompt: userPrompt };
+    return { 
+      answer, 
+      historyCount: Math.floor(history.messages.length / 2), 
+      prompt: userPrompt,
+      loadedQuestionImagesCount: questionImages.length
+    };
   } catch (err) {
     return { error: `Network error: ${err.message}` };
   }
 }
 
-async function getOrCreateHistory(sessionId, context, contextImages) {
+async function getOrCreateHistory(sessionId, context, contextImageUrls) {
   if (conversationHistories[sessionId]) {
     const existing = conversationHistories[sessionId];
     const contextChanged = context && existing.context !== context;
-    const imagesChanged = contextImages && JSON.stringify(existing.contextImages) !== JSON.stringify(contextImages);
+    const imagesChanged = contextImageUrls && JSON.stringify(existing.contextImageUrls) !== JSON.stringify(contextImageUrls);
     
     if (contextChanged || imagesChanged) {
-      conversationHistories[sessionId] = { context, contextImages, messages: [] };
+      conversationHistories[sessionId] = { context, contextImageUrls, messages: [] };
     }
     return conversationHistories[sessionId];
   }
@@ -99,16 +174,16 @@ async function getOrCreateHistory(sessionId, context, contextImages) {
 
   if (allHistories[sessionId]) {
     const contextChanged = context && allHistories[sessionId].context !== context;
-    const imagesChanged = contextImages && JSON.stringify(allHistories[sessionId].contextImages) !== JSON.stringify(contextImages);
+    const imagesChanged = contextImageUrls && JSON.stringify(allHistories[sessionId].contextImageUrls) !== JSON.stringify(contextImageUrls);
     
     if (contextChanged || imagesChanged) {
-      allHistories[sessionId] = { context, contextImages, messages: [] };
+      allHistories[sessionId] = { context, contextImageUrls, messages: [] };
     }
     conversationHistories[sessionId] = allHistories[sessionId];
     return conversationHistories[sessionId];
   }
 
-  const newHistory = { context, contextImages, messages: [] };
+  const newHistory = { context, contextImageUrls, messages: [] };
   conversationHistories[sessionId] = newHistory;
   return newHistory;
 }
@@ -148,7 +223,7 @@ async function getHistoryInfo(sessionId) {
     return { 
       count: Math.floor(msgCount / 2), 
       hasContext: !!conversationHistories[sessionId].context,
-      hasMedia: conversationHistories[sessionId].contextImages?.length > 0
+      hasMedia: conversationHistories[sessionId].contextImageUrls?.length > 0
     };
   }
 
@@ -159,26 +234,30 @@ async function getHistoryInfo(sessionId) {
     return { 
       count: Math.floor(msgCount / 2), 
       hasContext: !!allHistories[sessionId].context,
-      hasMedia: allHistories[sessionId].contextImages?.length > 0
+      hasMedia: allHistories[sessionId].contextImageUrls?.length > 0
     };
   }
 
   return { count: 0, hasContext: false, hasMedia: false };
 }
 
-function buildUserPrompt(question, context, hasImages) {
+function buildUserPrompt(question, context, hasContextImages, hasQuestionImages) {
   const sections = [];
 
   if (context) {
     sections.push(`## Context\n${context}`);
   }
 
-  if (hasImages) {
+  if (hasContextImages) {
     sections.push(`## Context Images\nThe following images are provided as part of the context. Analyze them carefully along with the text context above.`);
   }
 
   sections.push(`## Question Type\n${question.type}`);
   sections.push(`## Question\n${question.text}`);
+
+  if (hasQuestionImages) {
+    sections.push(`## Question Images\nThe following images belong directly to the question. Analyze them carefully to answer the question.`);
+  }
 
   if (question.options && question.options.length > 0) {
     sections.push(`## Options\n${question.options.map((opt, i) => `${i + 1}. ${opt}`).join('\n')}`);
@@ -213,8 +292,11 @@ function buildUserPrompt(question, context, hasImages) {
       instructions.push("IMPORTANT: Ignore any pre-selected radio button shown in the question. Determine the correct answer independently.");
       break;
     case "Short Answer":
-      instructions.push("Provide a concise, direct answer (1-2 sentences max).");
-      instructions.push("Be specific and accurate.");
+      instructions.push("Provide a concise, direct answer (a single number, word, or short phrase).");
+      instructions.push("If the question contains placeholders like [Input 1], [Input 2], etc., you MUST provide the answer for each placeholder on a separate line in your <answer> section, in the correct order (e.g. first line for [Input 1], second line for [Input 2], etc.). Do NOT include label prefixes like 'Input 1:' or 'N='.");
+      instructions.push("If the answer is a numerical value, return ONLY the number (e.g., '0.5' or '15'). Do NOT include the variable prefix (like 'R =') or unit suffix (like 'm', 'kg', 'м') unless the question does not specify them outside the input box.");
+      instructions.push("For numerical values, do NOT round to an integer unless explicitly requested. Keep the fractional part and round to 1 or 2 decimal places (e.g. '214.86' or '214.9') to maintain accuracy for automated grading.");
+      instructions.push("Do NOT add ending punctuation like periods to the answer.");
       break;
     case "Essay":
       instructions.push("Provide a well-structured answer with clear reasoning.");
@@ -239,21 +321,25 @@ function buildUserPrompt(question, context, hasImages) {
       instructions.push("Provide the most accurate answer possible.");
   }
 
-  if (context || hasImages) {
+  if (context || hasContextImages) {
     instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided Context section and Context Images above.");
     instructions.push("Do NOT use external knowledge, general facts, or assumptions.");
     instructions.push("Step 1: Check if the Context (text and images) contains information relevant to answering the Question.");
     instructions.push("Step 2: If the Context is relevant, use it to determine the correct answer.");
     instructions.push("Step 3: If the Context does NOT contain relevant information, respond with: 'Context does not contain information to answer this question.'");
     instructions.push("NEVER guess or use outside knowledge.");
-    if (hasImages) {
-      instructions.push("IMPORTANT: The context images may contain crucial information needed to answer the question. Analyze them carefully.");
-    }
   }
 
   sections.push(`## Instructions\n${instructions.join('\n')}`);
-  sections.push(`## Answer Format\nReturn ONLY the answer. No explanations, no reasoning, no extra text.`);
-  sections.push(`## Important\nThe question may show pre-selected answers (checked checkboxes, selected radio buttons, filled dropdowns). IGNORE these completely. They may be incorrect. Analyze the question independently and provide the correct answer.`);
+  sections.push(`## Answer Format
+CRITICAL: You MUST think step-by-step before answering to ensure mathematical and physics formulas are applied correctly (e.g. correct moment of inertia).
+You must format your response exactly like this:
+<reasoning>
+[Write your step-by-step derivation, formula selection, and calculation here. Show your thoughts.]
+</reasoning>
+<answer>
+[Write ONLY the final cleaned answer here, formatted exactly as requested in the instructions. No extra text, no explanation.]
+</answer>`);
 
   return sections.join('\n\n');
 }

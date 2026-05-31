@@ -3,141 +3,262 @@
   const LOADING_TEXT = "Loading...";
   const CONTEXT_BTN_TEXT = "Set Context";
   const CLEAR_CONTEXT_TEXT = "Clear Context";
-  const CLEAR_HISTORY_TEXT = "Clear History";
 
   let activeContextEl = null;
-  let activeContextImageCount = 0;
 
   function getSessionId() {
     return window.location.origin + window.location.pathname + window.location.search;
   }
 
-  function extractMediaFromElement(element) {
-    const mediaItems = [];
+  function parseResponse(responseText) {
+    const reasoningMatch = responseText.match(/<reasoning>([\s\S]*?)<\/reasoning>/i);
+    const answerMatch = responseText.match(/<answer>([\s\S]*?)<\/answer>/i);
     
-    const images = element.querySelectorAll("img");
-    images.forEach((img) => {
-      if (img.src && !img.src.startsWith("data:")) {
-        mediaItems.push({ type: "image", url: img.src, alt: img.alt || "" });
-      }
-    });
+    const reasoning = reasoningMatch ? reasoningMatch[1].trim() : "";
+    const answer = answerMatch ? answerMatch[1].trim() : responseText.replace(/<\/?reasoning>|<\/?answer>/gi, "").trim();
     
-    const videos = element.querySelectorAll("video, iframe[src*='youtube'], iframe[src*='vimeo'], iframe[src*='video']");
-    videos.forEach((video) => {
-      const src = video.src || video.querySelector("source")?.src;
-      if (src) {
-        mediaItems.push({ type: "video", url: src });
-      }
-    });
-    
-    const audios = element.querySelectorAll("audio");
-    audios.forEach((audio) => {
-      const src = audio.src || audio.querySelector("source")?.src;
-      if (src) {
-        mediaItems.push({ type: "audio", url: src });
-      }
-    });
-    
-    return mediaItems;
+    return { reasoning, answer };
   }
 
-  async function loadImageAsBase64(imgElement, maxDimension = 1024) {
-    return new Promise((resolve) => {
-      try {
-        if (!imgElement || !imgElement.complete || !imgElement.naturalWidth) {
-          resolve(null);
-          return;
-        }
-        
-        let width = imgElement.naturalWidth;
-        let height = imgElement.naturalHeight;
-        
-        if (width > maxDimension || height > maxDimension) {
-          const ratio = Math.min(maxDimension / width, maxDimension / height);
-          width = Math.floor(width * ratio);
-          height = Math.floor(height * ratio);
-        }
-        
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(imgElement, 0, 0, width, height);
-        
-        const base64 = canvas.toDataURL("image/jpeg", 0.8);
-        const base64Data = base64.split(",")[1];
-        
-        resolve({
-          mimeType: "image/jpeg",
-          data: base64Data,
-          size: base64Data.length
-        });
-      } catch (err) {
-        if (err.name === "SecurityError") {
-          console.warn(`CORS restriction on image: ${imgElement.src}`);
-        } else {
-          console.warn(`Failed to convert image to base64:`, err);
-        }
-        resolve(null);
-      }
+  function parseFormula(formula) {
+    let html = formula;
+
+    const symbols = {
+      '\\alpha': '&alpha;',
+      '\\beta': '&beta;',
+      '\\gamma': '&gamma;',
+      '\\delta': '&delta;',
+      '\\epsilon': '&epsilon;',
+      '\\varepsilon': '&epsilon;',
+      '\\zeta': '&zeta;',
+      '\\eta': '&eta;',
+      '\\theta': '&theta;',
+      '\\iota': '&iota;',
+      '\\kappa': '&kappa;',
+      '\\lambda': '&lambda;',
+      '\\mu': '&mu;',
+      '\\nu': '&nu;',
+      '\\xi': '&xi;',
+      '\\pi': '&pi;',
+      '\\rho': '&rho;',
+      '\\sigma': '&sigma;',
+      '\\tau': '&tau;',
+      '\\upsilon': '&upsilon;',
+      '\\phi': '&phi;',
+      '\\varphi': '&phi;',
+      '\\chi': '&chi;',
+      '\\psi': '&psi;',
+      '\\omega': '&omega;',
+      '\\Delta': '&Delta;',
+      '\\cdot': '&middot;',
+      '\\times': '&times;',
+      '\\le': '&le;',
+      '\\leq': '&le;',
+      '\\ge': '&ge;',
+      '\\geq': '&ge;',
+      '\\neq': '&ne;',
+      '\\infty': '&infin;',
+      '\\approx': '&approx;'
+    };
+
+    Object.keys(symbols).forEach(key => {
+      const escapedKey = key.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      html = html.replace(new RegExp(escapedKey, 'g'), symbols[key]);
     });
+
+    for (let i = 0; i < 2; i++) {
+      html = html.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, 
+        '<span class="latex-frac"><span class="latex-num">$1</span><span class="latex-den">$2</span></span>'
+      );
+    }
+
+    html = html.replace(/_\{([^}]+)\}/g, '<sub>$1</sub>');
+    html = html.replace(/\^\{([^}]+)\}/g, '<sup>$1</sup>');
+    html = html.replace(/_([a-zA-Z0-9&;])/g, '<sub>$1</sub>');
+    html = html.replace(/\^([a-zA-Z0-9&;])/g, '<sup>$1</sup>');
+    html = html.replace(/\\text\s*\{([^}]+)\}/g, '$1');
+    html = html.replace(/\\/g, '');
+
+    return html;
   }
 
-  async function loadContextImagesAsBase64(element) {
-    const images = element.querySelectorAll("img");
-    const maxImages = 5;
-    const imagesToProcess = Array.from(images).slice(0, maxImages);
+  function renderLatexToHtml(text) {
+    let html = text.replace(/\$([\s\S]+?)\$/g, (match, formula) => {
+      return `<span class="moodle-ai-formula">${parseFormula(formula)}</span>`;
+    });
+    return html;
+  }
+
+  function cleanOptionText(text) {
+    return text
+      .replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '') // remove Moodle status
+      .replace(/^[a-z0-9а-яё][\.\)\s-]+\s*/i, '') // remove prefixes like "a.", "1.", "a)", "а)" (Cyrillic and English)
+      .replace(/[\s\xa0]+/g, ' ') // normalize all spaces and non-breaking spaces
+      .trim();
+  }
+
+  function cleanTextForMatching(text) {
+    let cleaned = text.toLowerCase();
     
-    const loadedImages = [];
+    // Normalize Latin lookalikes (homoglyphs) to Cyrillic to prevent mixed-script matching failures
+    const homoglyphs = {
+      'a': 'а',
+      'c': 'с',
+      'e': 'е',
+      'i': 'і',
+      'k': 'к',
+      'm': 'м',
+      'o': 'о',
+      'p': 'р',
+      's': 'с',
+      'x': 'х',
+      'y': 'у'
+    };
     
-    for (const img of imagesToProcess) {
-      if (img.src && !img.src.startsWith("data:") && img.complete && img.naturalWidth > 0) {
-        const result = await loadImageAsBase64(img);
-        if (result) {
-          loadedImages.push({
-            ...result,
-            alt: img.alt || "",
-            originalUrl: img.src
-          });
-        }
+    cleaned = cleaned.split('').map(char => homoglyphs[char] || char).join('');
+
+    return cleaned
+      .replace(/[^a-z0-9а-яёі]/gi, '')
+      .trim();
+  }
+
+  function getElementTextWithoutSelects(element) {
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll("select, button, .moodle-ai-btn-wrapper, .moodle-ai-answer").forEach(el => el.remove());
+    return clone.innerText.trim();
+  }
+
+  function getInputLabelText(input, formulation) {
+    if (input.id) {
+      const label = formulation.querySelector(`label[for="${input.id}"]`);
+      if (label && label.innerText.trim()) return label.innerText;
+    }
+    
+    const parentLabel = input.closest("label");
+    if (parentLabel && parentLabel.innerText.trim()) return parentLabel.innerText;
+    
+    let sibling = input.nextElementSibling;
+    while (sibling) {
+      if (sibling.tagName === "LABEL" || sibling.className.includes("label") || sibling.className.includes("text")) {
+        if (sibling.innerText.trim()) return sibling.innerText;
+      }
+      sibling = sibling.nextElementSibling;
+    }
+
+    const container = input.closest(".r0, .r1, .option, .answer, [class*='option'], [class*='choice']");
+    if (container) {
+      const clone = container.cloneNode(true);
+      clone.querySelectorAll('input').forEach(el => el.remove());
+      return clone.innerText;
+    }
+
+    return "";
+  }
+
+  function clickInput(input, formulation) {
+    if (input.id) {
+      const label = formulation.querySelector(`label[for="${input.id}"]`);
+      if (label) {
+        label.click();
+        return;
       }
     }
     
-    return loadedImages;
+    const parentLabel = input.closest("label");
+    if (parentLabel) {
+      parentLabel.click();
+      return;
+    }
+    
+    input.click();
+  }
+
+  function getMathText(element) {
+    // 1. Check for MathJax v3 data-tex attribute (very common in modern Moodle)
+    const mathJaxV3Containers = element.querySelectorAll('[data-tex]');
+    if (mathJaxV3Containers.length > 0) {
+      let texTexts = [];
+      mathJaxV3Containers.forEach(container => {
+        texTexts.push(container.getAttribute('data-tex').trim());
+      });
+      return texTexts.join(' ');
+    }
+
+    // 2. Check for MathJax v2 script tags (older Moodle)
+    const mathJaxScripts = element.querySelectorAll('script[type^="math/tex"]');
+    if (mathJaxScripts.length > 0) {
+      let scriptTexts = [];
+      mathJaxScripts.forEach(script => {
+        scriptTexts.push(script.textContent.trim());
+      });
+      return scriptTexts.join(' ');
+    }
+    
+    // 3. Check for LaTeX images (Moodle Tex filter)
+    const texImages = element.querySelectorAll('img.tex, img.latex, img[class*="tex"]');
+    if (texImages.length > 0) {
+      let altTexts = [];
+      texImages.forEach(img => {
+        if (img.alt) altTexts.push(img.alt.trim());
+      });
+      if (altTexts.length > 0) return altTexts.join(' ');
+    }
+    
+    // 4. Check for MathML annotations
+    const annotations = element.querySelectorAll('annotation[encoding*="tex"]');
+    if (annotations.length > 0) {
+      let annotationTexts = [];
+      annotations.forEach(ann => {
+        annotationTexts.push(ann.textContent.trim());
+      });
+      return annotationTexts.join(' ');
+    }
+    
+    // 5. Fallback to text content without interactive elements
+    return getElementTextWithoutSelects(element);
+  }
+
+  function extractMediaUrlsFromElement(element) {
+    const urls = [];
+    const images = element.querySelectorAll("img");
+    images.forEach((img) => {
+      // Filter out small icons like question mark or checkmark icons
+      if (img.src && !img.src.startsWith("data:") && img.naturalWidth !== 16 && img.naturalHeight !== 16) {
+        urls.push(img.src);
+      }
+    });
+    return urls;
   }
 
   async function loadContext() {
-    const { context, contextUrl, contextImageCount } = await chrome.storage.local.get(["context", "contextUrl", "contextImageCount"]);
+    const { context, contextUrl, contextImageUrls } = await chrome.storage.local.get(["context", "contextUrl", "contextImageUrls"]);
     const currentUrl = window.location.origin + window.location.pathname;
     if (contextUrl !== currentUrl) {
-      await chrome.storage.local.remove(["context", "contextUrl", "contextImageCount"]);
-      return { text: null, imageCount: 0 };
+      await chrome.storage.local.remove(["context", "contextUrl", "contextImageUrls"]);
+      return { text: null, imageUrls: [] };
     }
-    return { text: context || null, imageCount: contextImageCount || 0 };
+    return { text: context || null, imageUrls: contextImageUrls || [] };
   }
 
-  async function setContext(text, element, mediaItems = []) {
+  async function setContext(text, element, imageUrls = []) {
     const currentUrl = window.location.origin + window.location.pathname;
-    const imageCount = mediaItems.filter(m => m.type === "image").length;
     
     await chrome.storage.local.set({ 
       context: text, 
       contextUrl: currentUrl,
-      contextImageCount: imageCount
+      contextImageUrls: imageUrls
     });
     activeContextEl = element;
-    activeContextImageCount = imageCount;
     element.classList.add("moodle-ai-context-active");
     updateContextButtons();
     updateGlobalContextIndicator();
   }
 
   async function clearContext() {
-    await chrome.storage.local.remove(["context", "contextUrl", "contextImageCount"]);
+    await chrome.storage.local.remove(["context", "contextUrl", "contextImageUrls"]);
     if (activeContextEl) {
       activeContextEl.classList.remove("moodle-ai-context-active");
       activeContextEl = null;
-      activeContextImageCount = 0;
     }
     updateContextButtons();
     updateGlobalContextIndicator();
@@ -149,16 +270,6 @@
       const isActive = formulation === activeContextEl;
       btn.textContent = isActive ? CLEAR_CONTEXT_TEXT : CONTEXT_BTN_TEXT;
       btn.classList.toggle("moodle-ai-context-btn-active", isActive);
-      
-      const existingIndicator = btn.querySelector(".moodle-ai-context-media-indicator");
-      if (existingIndicator) existingIndicator.remove();
-      
-      if (isActive && activeContextImageCount > 0) {
-        const indicator = document.createElement("span");
-        indicator.className = "moodle-ai-context-media-indicator";
-        indicator.textContent = `${activeContextImageCount} image${activeContextImageCount > 1 ? "s" : ""}`;
-        btn.appendChild(indicator);
-      }
     });
   }
 
@@ -196,7 +307,22 @@
 
   function extractQuestionData(formulation) {
     const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
-    let questionText = questionTextEl ? questionTextEl.innerText.trim() : formulation.innerText.trim();
+    let questionText = "";
+    let imageUrls = [];
+
+    if (questionTextEl) {
+      const clone = questionTextEl.cloneNode(true);
+      const inputs = clone.querySelectorAll('input[type="text"]');
+      inputs.forEach((input, index) => {
+        const placeholder = document.createTextNode(`[Input ${index + 1}]`);
+        input.parentNode.replaceChild(placeholder, input);
+      });
+      questionText = clone.innerText.trim();
+      imageUrls = extractMediaUrlsFromElement(questionTextEl);
+    } else {
+      questionText = formulation.innerText.trim();
+      imageUrls = extractMediaUrlsFromElement(formulation);
+    }
     
     questionText = questionText
       .replace(/\s+/g, ' ')
@@ -205,92 +331,27 @@
       .trim();
 
     const type = detectQuestionType(formulation);
-
-    const data = { type, text: questionText };
+    const data = { type, text: questionText, imageUrls };
 
     if (type.includes("Multiple Choice") || type === "True/False") {
       const options = [];
       const seenTexts = new Set();
       
       const addOption = (text) => {
-        const cleanText = text.replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '').trim();
-        const withoutNumber = cleanText.replace(/^\d+[\.\)\s-]+/, '').trim();
-        if (withoutNumber && withoutNumber.length > 1 && !seenTexts.has(withoutNumber)) {
-          seenTexts.add(withoutNumber);
-          options.push(withoutNumber);
+        const cleanText = cleanOptionText(text);
+        if (cleanText && !seenTexts.has(cleanText)) {
+          seenTexts.add(cleanText);
+          options.push(cleanText);
         }
       };
       
-      // Strategy 1: Direct radio/checkbox inputs with their labels (most reliable)
       const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
       inputs.forEach((input) => {
-        // Try closest label first
-        let label = input.closest("label");
-        // Try label[for="inputId"]
-        if (!label && input.id) {
-          label = formulation.querySelector(`label[for="${input.id}"]`);
-        }
-        // Try parent element if it's a label
-        if (!label && input.parentElement && input.parentElement.tagName === "LABEL") {
-          label = input.parentElement;
-        }
-        // Try sibling label
-        if (!label) {
-          label = input.nextElementSibling;
-          if (label && label.tagName !== "LABEL") label = null;
-        }
-        
-        if (label) {
-          addOption(label.innerText);
+        const labelText = getInputLabelText(input, formulation);
+        if (labelText) {
+          addOption(labelText);
         }
       });
-      
-      // Strategy 2: .answer containers with direct text or label
-      if (options.length === 0) {
-        const answerContainers = formulation.querySelectorAll(".que .answer, .formulation .answer");
-        answerContainers.forEach((container) => {
-          const label = container.querySelector("label");
-          if (label) {
-            addOption(label.innerText);
-          } else {
-            const text = container.innerText.trim();
-            if (text && text.length < 300 && text.length > 1) {
-              addOption(text);
-            }
-          }
-        });
-      }
-      
-      // Strategy 3: Specific label selectors within answer areas
-      if (options.length === 0) {
-        const fallbackSelectors = [
-          ".que .answer label",
-          ".formulation .answer label",
-          ".answer .label",
-          ".answer .content",
-          ".answer .text",
-          "label[for*='answer']",
-          "label[for*='choice']"
-        ];
-        
-        fallbackSelectors.forEach((selector) => {
-          formulation.querySelectorAll(selector).forEach((el) => {
-            addOption(el.innerText);
-          });
-        });
-      }
-      
-      // Strategy 4: Last resort - all labels, filter by length and exclude question text
-      if (options.length === 0) {
-        const allLabels = formulation.querySelectorAll("label");
-        const questionText = formulation.querySelector(".qtext, .questiontext")?.innerText.trim() || "";
-        allLabels.forEach((label) => {
-          const text = label.innerText.trim();
-          if (text && text.length > 1 && text.length < 200 && text !== questionText) {
-            addOption(text);
-          }
-        });
-      }
 
       data.options = options;
       console.log("[Moodle AI] Extracted options:", options);
@@ -302,12 +363,10 @@
       selects.forEach((select) => {
         const row = select.closest("tr, div, li");
         if (row) {
-          const rowText = row.innerText;
-          const selectText = select.innerText;
-          const itemText = rowText.split(selectText)[0].trim();
+          const itemText = getMathText(row);
           const matches = [];
           select.querySelectorAll("option").forEach((opt) => {
-            if (opt.value) matches.push(opt.text.trim());
+            if (opt.value) matches.push(cleanOptionText(opt.text));
           });
           if (itemText) {
             pairs.push({ item: itemText, matches });
@@ -319,70 +378,16 @@
 
     if (type === "Ordering") {
       const items = [];
-      
-      // Strategy 1: Table-based layout (most common in Moodle)
-      const rows = formulation.querySelectorAll("tr");
-      rows.forEach((row) => {
-        const select = row.querySelector("select");
-        if (!select) return;
+      const selects = formulation.querySelectorAll("select");
+      selects.forEach((select) => {
+        const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9, [class*='answer']");
+        if (!row) return;
         
-        const cells = row.querySelectorAll("td, th");
-        let statementText = "";
-        
-        cells.forEach((cell) => {
-          if (!cell.contains(select)) {
-            const text = cell.innerText.trim();
-            if (text && text.length > 3) {
-              statementText = text;
-            }
-          }
-        });
-        
-        if (!statementText) {
-          const allText = row.innerText;
-          const selectOptionsText = Array.from(select.querySelectorAll("option"))
-            .map(opt => opt.text.trim())
-            .join(" ");
-          statementText = allText.replace(selectOptionsText, "").trim();
-        }
-        
-        if (statementText && statementText.length > 3) {
+        const statementText = getMathText(row);
+        if (statementText && statementText.length > 1) {
           items.push({ text: statementText });
         }
       });
-      
-      // Strategy 2: Non-table layout (divs, lists)
-      if (items.length === 0) {
-        const selects = formulation.querySelectorAll("select");
-        selects.forEach((select) => {
-          const row = select.closest("div, li, .answer, .flex-fill, .col-md-9, [class*='answer']");
-          if (!row) return;
-          
-          const selectOptionsText = Array.from(select.querySelectorAll("option"))
-            .map(opt => opt.text.trim())
-            .join(" ");
-          
-          const allText = row.innerText;
-          let statementText = allText.replace(selectOptionsText, "").trim();
-          
-          if (!statementText) {
-            const children = Array.from(row.childNodes);
-            const textParts = [];
-            children.forEach((child) => {
-              if (child.nodeType === Node.TEXT_NODE) {
-                textParts.push(child.textContent.trim());
-              } else if (child !== select && !select.contains(child)) {
-                textParts.push(child.innerText.trim());
-              }
-            });
-            statementText = textParts.filter(Boolean).join(" ").trim();
-          }
-          
-          if (statementText && statementText.length > 3) {
-            items.push({ text: statementText });
-          }
-        });
-      }
       
       data.orderingItems = items;
       console.log("[Moodle AI] Extracted ordering items:", items.map(i => i.text.substring(0, 50)));
@@ -418,17 +423,15 @@
 
       const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
       inputs.forEach((input) => {
-        const label = input.closest("label") || formulation.querySelector(`label[for="${input.id}"]`);
-        if (!label) return;
+        const labelText = getInputLabelText(input, formulation);
+        if (!labelText) return;
 
-        const labelText = label.innerText.trim().toLowerCase();
-        if (isTrue && (/\btrue\b|верно|правильно|да|yes/i.test(labelText))) {
-          input.checked = true;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
+        const labelTextLower = labelText.trim().toLowerCase();
+        if (isTrue && (/\btrue\b|верно|правильно|да|yes/i.test(labelTextLower))) {
+          if (!input.checked) clickInput(input, formulation);
         }
-        if (isFalse && (/\bfalse\b|неверно|неправильно|нет|no/i.test(labelText))) {
-          input.checked = true;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
+        if (isFalse && (/\bfalse\b|неверно|неправильно|нет|no/i.test(labelTextLower))) {
+          if (!input.checked) clickInput(input, formulation);
         }
       });
     }
@@ -441,54 +444,47 @@
 
       if (isMultiple) {
         inputs.forEach((input) => {
-          input.checked = false;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
+          if (input.checked) {
+            clickInput(input, formulation); // Uncheck via click to trigger listeners
+          }
         });
 
         const answerLines = normalizedAnswer
           .split(/\n/)
-          .map((l) => l.replace(/^\d+[\.\):\s-]+/, "").trim())
+          .map((l) => cleanTextForMatching(cleanOptionText(l)))
           .filter(Boolean);
 
         inputs.forEach((input) => {
-          const label = input.closest("label") || formulation.querySelector(`label[for="${input.id}"]`);
-          if (!label) return;
+          const labelText = getInputLabelText(input, formulation);
+          if (!labelText) return;
 
-          const labelText = label.innerText.trim();
-          const labelTextLower = labelText.toLowerCase();
+          const labelTextClean = cleanTextForMatching(cleanOptionText(labelText));
 
           const isMatch = answerLines.some((line) => {
-            const lineLower = line.toLowerCase();
-            return labelTextLower === lineLower ||
-                   labelTextLower.includes(lineLower) ||
-                   lineLower.includes(labelTextLower);
+            return labelTextClean === line ||
+                   labelTextClean.includes(line) ||
+                   line.includes(labelTextClean);
           });
 
-          if (isMatch) {
-            input.checked = true;
-            input.dispatchEvent(new Event("change", { bubbles: true }));
+          if (isMatch && !input.checked) {
+            clickInput(input, formulation);
           }
         });
       } else {
-        inputs.forEach((input) => {
-          input.checked = false;
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        });
-
-        const answerText = normalizedAnswer.replace(/^\d+[\.\):\s-]+/, "").trim();
+        const answerClean = cleanTextForMatching(cleanOptionText(answer));
 
         inputs.forEach((input) => {
-          const label = input.closest("label") || formulation.querySelector(`label[for="${input.id}"]`);
-          if (!label) return;
+          const labelText = getInputLabelText(input, formulation);
+          if (!labelText) return;
 
-          const labelText = label.innerText.trim();
-          const labelTextLower = labelText.toLowerCase();
+          const labelTextClean = cleanTextForMatching(cleanOptionText(labelText));
 
-          if (labelTextLower === answerText ||
-              labelTextLower.includes(answerText) ||
-              answerText.includes(labelTextLower)) {
-            input.checked = true;
-            input.dispatchEvent(new Event("change", { bubbles: true }));
+          if (labelTextClean === answerClean ||
+              labelTextClean.includes(answerClean) ||
+              answerClean.includes(labelTextClean)) {
+            if (!input.checked) {
+              clickInput(input, formulation);
+            }
           }
         });
       }
@@ -496,12 +492,21 @@
 
     if (questionType === "Short Answer" || questionType === "Essay") {
       const textarea = formulation.querySelector("textarea");
-      const textInput = formulation.querySelector('input[type="text"]');
-      const target = textarea || textInput;
-      if (target) {
-        target.value = answer.trim();
-        target.dispatchEvent(new Event("input", { bubbles: true }));
-        target.dispatchEvent(new Event("change", { bubbles: true }));
+      if (textarea) {
+        textarea.value = answer.trim();
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        textarea.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        const textInputs = formulation.querySelectorAll('input[type="text"]');
+        const answerLines = answer.split('\n').map(l => l.trim()).filter(Boolean);
+        
+        textInputs.forEach((input, index) => {
+          if (index < answerLines.length) {
+            input.value = answerLines[index];
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        });
       }
     }
 
@@ -516,24 +521,72 @@
         })
         .filter(Boolean);
 
+      const cleanFormulaForMatching = (text) => {
+        return text
+          .toLowerCase()
+          .replace(/\\frac|\\cdot|\\times/g, '')
+          .replace(/[^a-z0-9а-яё]/gi, '')
+          .trim();
+      };
+
       const selects = formulation.querySelectorAll("select");
       selects.forEach((select) => {
         const row = select.closest("tr, div, li");
         if (!row) return;
 
-        const rowText = row.innerText.split(select.value || "")[0].trim();
-        const matchedPair = answerPairs.find(
-          (pair) => pair.item.toLowerCase().includes(rowText.toLowerCase()) || rowText.toLowerCase().includes(pair.item.toLowerCase())
-        );
+        const rowText = getMathText(row);
+        const cleanedRow = cleanFormulaForMatching(rowText);
 
-        if (matchedPair) {
+        let bestPair = null;
+        let highestScore = -1;
+
+        answerPairs.forEach((pair) => {
+          const cleanedItem = cleanFormulaForMatching(pair.item);
+          let score = 0;
+
+          if (cleanedRow === cleanedItem) {
+            score = 100;
+          } else if (cleanedRow.includes(cleanedItem) || cleanedItem.includes(cleanedRow)) {
+            score = 50 + calculateSimilarity(cleanedRow, cleanedItem);
+          } else {
+            score = calculateSimilarity(cleanedRow, cleanedItem) * 40;
+          }
+
+          if (score > highestScore && score > 10) {
+            highestScore = score;
+            bestPair = pair;
+          }
+        });
+
+        if (bestPair) {
           const options = select.querySelectorAll("option");
-          for (const option of options) {
-            if (option.value && option.text.trim().toLowerCase().includes(matchedPair.match.toLowerCase())) {
-              select.value = option.value;
-              select.dispatchEvent(new Event("change", { bubbles: true }));
-              break;
+          const cleanedMatchTarget = cleanOptionText(bestPair.match).toLowerCase();
+          
+          let bestOption = null;
+          let highestOptionScore = -1;
+
+          options.forEach((option) => {
+            if (!option.value) return;
+            const optionTextClean = cleanOptionText(option.text).toLowerCase();
+            let score = 0;
+
+            if (optionTextClean === cleanedMatchTarget) {
+              score = 100;
+            } else if (optionTextClean.includes(cleanedMatchTarget) || cleanedMatchTarget.includes(optionTextClean)) {
+              score = 50 + calculateSimilarity(optionTextClean, cleanedMatchTarget);
+            } else {
+              score = calculateSimilarity(optionTextClean, cleanedMatchTarget) * 40;
             }
+
+            if (score > highestOptionScore && score > 10) {
+              highestOptionScore = score;
+              bestOption = option;
+            }
+          });
+
+          if (bestOption) {
+            select.value = bestOption.value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
           }
         }
       });
@@ -552,16 +605,16 @@
         const match = line.match(/^(\d+)[\.\):\s-]+(.+)$/);
         if (match) {
           foundFirstNumbered = true;
-          orderedItems.push({ position: parseInt(match[1]), text: match[2].trim() });
+          orderedItems.push({ position: parseInt(match[1]), text: cleanOptionText(match[2]) });
         } else if (!foundFirstNumbered) {
-          // Skip introductory text before first numbered item
+          // Skip introductory text
         }
       });
 
       if (orderedItems.length === 0) {
         answerLines.forEach((line, index) => {
           if (line && !line.toLowerCase().includes("statement") && !line.toLowerCase().includes("based on")) {
-            orderedItems.push({ position: index + 1, text: line });
+            orderedItems.push({ position: index + 1, text: cleanOptionText(line) });
           }
         });
       }
@@ -572,15 +625,15 @@
         const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9");
         if (!row) return;
 
-        const rowText = row.innerText.replace(select.innerText, "").trim();
+        const rowTextClean = cleanOptionText(getMathText(row)).toLowerCase();
         
         let targetPosition = null;
         
         for (let i = 0; i < orderedItems.length; i++) {
-          const aiItemText = orderedItems[i].text.toLowerCase().replace(/[^\w\s]/g, '');
-          const rowTextClean = rowText.toLowerCase().replace(/[^\w\s]/g, '');
+          const aiItemClean = orderedItems[i].text.toLowerCase().replace(/[^\w\s]/g, '');
+          const rowTextRaw = rowTextClean.replace(/[^\w\s]/g, '');
           
-          const similarity = calculateSimilarity(aiItemText, rowTextClean);
+          const similarity = calculateSimilarity(aiItemClean, rowTextRaw);
           if (similarity > 0.5) {
             targetPosition = orderedItems[i].position;
             break;
@@ -662,9 +715,9 @@
       const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
       const contextText = questionTextEl ? questionTextEl.innerText.trim() : formulation.innerText.trim();
       
-      const mediaItems = extractMediaFromElement(formulation);
+      const imageUrls = extractMediaUrlsFromElement(formulation);
       
-      await setContext(contextText, formulation, mediaItems);
+      await setContext(contextText, formulation, imageUrls);
     }
   }
 
@@ -688,25 +741,18 @@
       formulation.appendChild(answerDiv);
     }
     
-    const contextStatusText = contextData.text
-      ? ` (Context active${contextData.imageCount > 0 ? ` + ${contextData.imageCount} image${contextData.imageCount > 1 ? "s" : ""}` : ""})`
-      : "";
+    const contextStatusText = contextData.text ? " (Context active)" : "";
     
     answerDiv.className = "moodle-ai-answer moodle-ai-answer-loading";
     answerDiv.textContent = `Asking Gemini...${contextStatusText}`;
 
     try {
-      let contextImagesBase64 = [];
-      if (contextData.imageCount > 0 && activeContextEl) {
-        answerDiv.textContent = "Loading context images...";
-        contextImagesBase64 = await loadContextImagesAsBase64(activeContextEl);
-      }
-
       const response = await safeSendMessage({
         action: "getAnswer",
         question: questionData,
+        questionImageUrls: questionData.imageUrls,
         context: contextData.text,
-        contextImages: contextImagesBase64,
+        contextImageUrls: contextData.imageUrls,
         sessionId,
       });
 
@@ -718,9 +764,23 @@
           ? `<span class="moodle-ai-context-status" title="${contextData.text.substring(0, 200)}"> Context active</span>`
           : `<span class="moodle-ai-context-status moodle-ai-context-status-none">No context</span>`;
         
-        const imageStatus = contextImagesBase64.length > 0
-          ? `<span class="moodle-ai-context-status">🖼️ ${contextImagesBase64.length} image${contextImagesBase64.length > 1 ? "s" : ""} sent</span>`
+        const qImagesCount = response.loadedQuestionImagesCount || 0;
+        const qImageStatus = qImagesCount > 0
+          ? `<span class="moodle-ai-context-status">🖼️ ${qImagesCount} question image${qImagesCount > 1 ? "s" : ""}</span>`
           : "";
+
+        const parsed = parseResponse(response.answer);
+
+        let bodyHtml = `<div class="moodle-ai-answer-text" style="font-weight: 600; font-size: 1.1em;">${parsed.answer.replace(/\n/g, "<br>")}</div>`;
+        if (parsed.reasoning) {
+          const formattedReasoning = renderLatexToHtml(parsed.reasoning);
+          bodyHtml += `
+            <details class="moodle-ai-reasoning-details" style="margin-top: 10px; border-top: 1px solid rgba(0,0,0,0.1); padding-top: 8px; font-size: 0.9em; color: #555;">
+              <summary style="cursor: pointer; font-weight: 500; outline: none; margin-bottom: 5px; color: #2e7d32;">Show Solution / Решение</summary>
+              <div class="moodle-ai-reasoning-body" style="background: rgba(0,0,0,0.02); padding: 8px; border-radius: 4px; white-space: pre-wrap; font-family: sans-serif; line-height: 1.4;">${formattedReasoning}</div>
+            </details>
+          `;
+        }
 
         answerDiv.className = "moodle-ai-answer moodle-ai-answer-success";
         answerDiv.innerHTML = `
@@ -728,11 +788,11 @@
             <strong>AI Answer:</strong>
             <div class="moodle-ai-context-indicators">
               ${contextStatus}
-              ${imageStatus}
+              ${qImageStatus}
               <button type="button" class="moodle-ai-view-log-btn" title="View full prompt and response">View Log</button>
             </div>
           </div>
-          <div class="moodle-ai-answer-body">${response.answer.replace(/\n/g, "<br>")}</div>
+          <div class="moodle-ai-answer-body">${bodyHtml}</div>
         `;
 
         const viewLogBtn = answerDiv.querySelector(".moodle-ai-view-log-btn");
@@ -742,10 +802,10 @@
 
         const { autofill } = await chrome.storage.sync.get(["autofill"]);
         if (autofill !== false) {
-          autoFillAnswer(formulation, response.answer, questionData.type);
+          autoFillAnswer(formulation, parsed.answer, questionData.type);
         }
 
-        updateHistoryBadge(response.historyCount, contextImagesBase64.length > 0);
+        updateHistoryBadge(response.historyCount);
       }
     } catch (err) {
       if (err.message === "Extension context invalidated") {
@@ -761,17 +821,16 @@
     btn.disabled = false;
   }
 
-  function createHistoryBadge(count, hasImages) {
+  function createHistoryBadge(count) {
     const badge = document.createElement("span");
     badge.className = "moodle-ai-history-badge";
-    badge.textContent = `History: ${count} Q&A${hasImages ? " + Images" : ""}`;
+    badge.textContent = `History: ${count} Q&A`;
     badge.addEventListener("click", async () => {
       try {
         if (!isExtensionValid()) return;
         const sessionId = getSessionId();
         await safeSendMessage({ action: "clearHistory", sessionId });
         badge.remove();
-        document.querySelectorAll(".moodle-ai-clear-history-btn").forEach((b) => b.remove());
       } catch (e) {
         if (e.message !== "Extension context invalidated") {
           console.warn("Failed to clear history:", e);
@@ -782,13 +841,13 @@
     return badge;
   }
 
-  function updateHistoryBadge(count, hasImages = false) {
+  function updateHistoryBadge(count) {
     document.querySelectorAll(".moodle-ai-history-badge").forEach((b) => b.remove());
 
     if (count > 0) {
       const wrapper = document.querySelector(".moodle-ai-btn-wrapper");
       if (wrapper && !wrapper.querySelector(".moodle-ai-history-badge")) {
-        const badge = createHistoryBadge(count, hasImages);
+        const badge = createHistoryBadge(count);
         wrapper.appendChild(badge);
       }
     }
@@ -804,9 +863,22 @@
 
   async function safeSendMessage(message) {
     if (!isExtensionValid()) {
-      throw new Error("Extension context invalidated");
+      return { error: "Extension context invalidated" };
     }
-    return chrome.runtime.sendMessage(message);
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            resolve({ error: lastError.message });
+          } else {
+            resolve(response || {});
+          }
+        });
+      } catch (err) {
+        resolve({ error: err.message });
+      }
+    });
   }
 
   async function loadHistoryBadge() {
@@ -818,7 +890,7 @@
       if (info && info.count > 0) {
         const wrapper = document.querySelector(".moodle-ai-btn-wrapper");
         if (wrapper && !wrapper.querySelector(".moodle-ai-history-badge")) {
-          const badge = createHistoryBadge(info.count, info.hasMedia);
+          const badge = createHistoryBadge(info.count);
           wrapper.appendChild(badge);
         }
       }
@@ -838,7 +910,7 @@
     }
 
     const formulations = document.querySelectorAll(
-      ".formulation, .que, [class*='question-container'], .formulation.clearfix"
+      ".formulation, [class*='question-container']"
     );
 
     formulations.forEach((formulation) => {
@@ -866,8 +938,7 @@
     document.querySelectorAll(".moodle-ai-context-indicator").forEach((indicator) => {
       if (activeContextEl) {
         indicator.style.display = "inline-flex";
-        const imageText = activeContextImageCount > 0 ? ` + ${activeContextImageCount} image${activeContextImageCount > 1 ? "s" : ""}` : "";
-        indicator.textContent = `Context active${imageText}`;
+        indicator.textContent = `Context active`;
         indicator.title = "Context is being used for all AI answers in this session";
       } else {
         indicator.style.display = "none";
@@ -883,7 +954,7 @@
       if (!contextData.text) return;
 
       const formulations = document.querySelectorAll(
-        ".formulation, .que, [class*='question-container'], .formulation.clearfix"
+        ".formulation, [class*='question-container']"
       );
 
       for (const formulation of formulations) {
@@ -891,7 +962,6 @@
         const text = questionTextEl ? questionTextEl.innerText.trim() : formulation.innerText.trim();
         if (text === contextData.text) {
           activeContextEl = formulation;
-          activeContextImageCount = contextData.imageCount || 0;
           formulation.classList.add("moodle-ai-context-active");
           updateContextButtons();
           updateGlobalContextIndicator();
