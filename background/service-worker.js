@@ -296,6 +296,7 @@ function buildUserPrompt(question, context, hasContextImages, hasQuestionImages)
       instructions.push("If the question contains placeholders like [Input 1], [Input 2], etc., you MUST provide the answer for each placeholder on a separate line in your <answer> section, in the correct order (e.g. first line for [Input 1], second line for [Input 2], etc.). Do NOT include label prefixes like 'Input 1:' or 'N='.");
       instructions.push("If the answer is a numerical value, return ONLY the number (e.g., '0.5' or '15'). Do NOT include the variable prefix (like 'R =') or unit suffix (like 'm', 'kg', 'м') unless the question does not specify them outside the input box.");
       instructions.push("For numerical values, do NOT round to an integer unless explicitly requested. Keep the fractional part and round to 1 or 2 decimal places (e.g. '214.86' or '214.9') to maintain accuracy for automated grading.");
+      instructions.push("IMPORTANT (Physics context): In Russian school/university physics thermodynamics tasks, the phrase 'кинетическая энергия теплового/хаотического движения всех молекул' (kinetic energy of chaotic motion of all molecules) refers to the translational kinetic energy formula: E = 1.5 * ν * R * T (using degrees of freedom i = 3, R = 8.31), even for diatomic gases like hydrogen (H2), nitrogen (N2), or oxygen (O2), unless the question explicitly specifies 'полная энергия' (full energy) or rotational motion.");
       instructions.push("Do NOT add ending punctuation like periods to the answer.");
       break;
     case "Essay":
