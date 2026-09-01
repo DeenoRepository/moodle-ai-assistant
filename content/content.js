@@ -13,10 +13,10 @@
   function parseResponse(responseText) {
     const reasoningMatch = responseText.match(/<reasoning>([\s\S]*?)<\/reasoning>/i);
     const answerMatch = responseText.match(/<answer>([\s\S]*?)<\/answer>/i);
-    
+
     const reasoning = reasoningMatch ? reasoningMatch[1].trim() : "";
     const answer = answerMatch ? answerMatch[1].trim() : responseText.replace(/<\/?reasoning>|<\/?answer>/gi, "").trim();
-    
+
     return { reasoning, answer };
   }
 
@@ -67,7 +67,7 @@
     });
 
     for (let i = 0; i < 2; i++) {
-      html = html.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, 
+      html = html.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g,
         '<span class="latex-frac"><span class="latex-num">$1</span><span class="latex-den">$2</span></span>'
       );
     }
@@ -99,7 +99,7 @@
 
   function cleanTextForMatching(text) {
     let cleaned = text.toLowerCase();
-    
+
     // Normalize Latin lookalikes (homoglyphs) to Cyrillic to prevent mixed-script matching failures
     const homoglyphs = {
       'a': 'а',
@@ -114,7 +114,7 @@
       'x': 'х',
       'y': 'у'
     };
-    
+
     cleaned = cleaned.split('').map(char => homoglyphs[char] || char).join('');
 
     return cleaned
@@ -133,10 +133,10 @@
       const label = formulation.querySelector(`label[for="${input.id}"]`);
       if (label && label.innerText.trim()) return label.innerText;
     }
-    
+
     const parentLabel = input.closest("label");
     if (parentLabel && parentLabel.innerText.trim()) return parentLabel.innerText;
-    
+
     let sibling = input.nextElementSibling;
     while (sibling) {
       if (sibling.tagName === "LABEL" || sibling.className.includes("label") || sibling.className.includes("text")) {
@@ -163,13 +163,13 @@
         return;
       }
     }
-    
+
     const parentLabel = input.closest("label");
     if (parentLabel) {
       parentLabel.click();
       return;
     }
-    
+
     input.click();
   }
 
@@ -193,7 +193,7 @@
       });
       return scriptTexts.join(' ');
     }
-    
+
     // 3. Check for LaTeX images (Moodle Tex filter)
     const texImages = element.querySelectorAll('img.tex, img.latex, img[class*="tex"]');
     if (texImages.length > 0) {
@@ -203,7 +203,7 @@
       });
       if (altTexts.length > 0) return altTexts.join(' ');
     }
-    
+
     // 4. Check for MathML annotations
     const annotations = element.querySelectorAll('annotation[encoding*="tex"]');
     if (annotations.length > 0) {
@@ -213,7 +213,7 @@
       });
       return annotationTexts.join(' ');
     }
-    
+
     // 5. Fallback to text content without interactive elements
     return getElementTextWithoutSelects(element);
   }
@@ -242,9 +242,9 @@
 
   async function setContext(text, element, imageUrls = []) {
     const currentUrl = window.location.origin + window.location.pathname;
-    
-    await chrome.storage.local.set({ 
-      context: text, 
+
+    await chrome.storage.local.set({
+      context: text,
       contextUrl: currentUrl,
       contextImageUrls: imageUrls
     });
@@ -323,7 +323,7 @@
       questionText = formulation.innerText.trim();
       imageUrls = extractMediaUrlsFromElement(formulation);
     }
-    
+
     questionText = questionText
       .replace(/\s+/g, ' ')
       .replace(/AI Answer|Set Context|Clear Context/gi, '')
@@ -336,7 +336,7 @@
     if (type.includes("Multiple Choice") || type === "True/False") {
       const options = [];
       const seenTexts = new Set();
-      
+
       const addOption = (text) => {
         const cleanText = cleanOptionText(text);
         if (cleanText && !seenTexts.has(cleanText)) {
@@ -344,7 +344,7 @@
           options.push(cleanText);
         }
       };
-      
+
       const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
       inputs.forEach((input) => {
         const labelText = getInputLabelText(input, formulation);
@@ -382,13 +382,13 @@
       selects.forEach((select) => {
         const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9, [class*='answer']");
         if (!row) return;
-        
+
         const statementText = getMathText(row);
         if (statementText && statementText.length > 1) {
           items.push({ text: statementText });
         }
       });
-      
+
       data.orderingItems = items;
       console.log("[Moodle AI] Extracted ordering items:", items.map(i => i.text.substring(0, 50)));
     }
@@ -398,19 +398,19 @@
 
   function calculateSimilarity(str1, str2) {
     if (!str1 || !str2) return 0;
-    
+
     const words1 = str1.split(/\s+/).filter(Boolean);
     const words2 = str2.split(/\s+/).filter(Boolean);
-    
+
     if (words1.length === 0 || words2.length === 0) return 0;
-    
+
     let matches = 0;
     words1.forEach(word1 => {
       if (words2.some(word2 => word2.includes(word1) || word1.includes(word2))) {
         matches++;
       }
     });
-    
+
     return matches / Math.max(words1.length, words2.length);
   }
 
@@ -499,7 +499,7 @@
       } else {
         const textInputs = formulation.querySelectorAll('input[type="text"]');
         const answerLines = answer.split('\n').map(l => l.trim()).filter(Boolean);
-        
+
         textInputs.forEach((input, index) => {
           if (index < answerLines.length) {
             input.value = answerLines[index];
@@ -561,7 +561,7 @@
         if (bestPair) {
           const options = select.querySelectorAll("option");
           const cleanedMatchTarget = cleanOptionText(bestPair.match).toLowerCase();
-          
+
           let bestOption = null;
           let highestOptionScore = -1;
 
@@ -600,7 +600,7 @@
 
       const orderedItems = [];
       let foundFirstNumbered = false;
-      
+
       answerLines.forEach((line) => {
         const match = line.match(/^(\d+)[\.\):\s-]+(.+)$/);
         if (match) {
@@ -620,19 +620,19 @@
       }
 
       const selects = formulation.querySelectorAll("select");
-      
+
       selects.forEach((select, selectIndex) => {
         const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9");
         if (!row) return;
 
         const rowTextClean = cleanOptionText(getMathText(row)).toLowerCase();
-        
+
         let targetPosition = null;
-        
+
         for (let i = 0; i < orderedItems.length; i++) {
           const aiItemClean = orderedItems[i].text.toLowerCase().replace(/[^\w\s]/g, '');
           const rowTextRaw = rowTextClean.replace(/[^\w\s]/g, '');
-          
+
           const similarity = calculateSimilarity(aiItemClean, rowTextRaw);
           if (similarity > 0.5) {
             targetPosition = orderedItems[i].position;
@@ -647,11 +647,11 @@
         if (targetPosition) {
           const options = select.querySelectorAll("option");
           let matched = false;
-          
+
           for (const option of options) {
             const optText = option.text.trim();
             const optValue = option.value.trim();
-            
+
             if (optText === String(targetPosition) || optValue === String(targetPosition)) {
               select.value = option.value;
               select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -659,7 +659,7 @@
               break;
             }
           }
-          
+
           if (!matched && options.length > 0) {
             const positionNum = parseInt(targetPosition);
             if (positionNum > 0 && positionNum <= options.length) {
@@ -714,9 +714,9 @@
     } else {
       const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
       const contextText = questionTextEl ? questionTextEl.innerText.trim() : formulation.innerText.trim();
-      
+
       const imageUrls = extractMediaUrlsFromElement(formulation);
-      
+
       await setContext(contextText, formulation, imageUrls);
     }
   }
@@ -740,11 +740,11 @@
       answerDiv.className = "moodle-ai-answer";
       formulation.appendChild(answerDiv);
     }
-    
+
     const contextStatusText = contextData.text ? " (Context active)" : "";
-    
+
     answerDiv.className = "moodle-ai-answer moodle-ai-answer-loading";
-    answerDiv.textContent = `Asking Gemini...${contextStatusText}`;
+    answerDiv.textContent = `Asking AI...${contextStatusText}`;
 
     try {
       const response = await safeSendMessage({
@@ -763,7 +763,7 @@
         const contextStatus = contextData.text
           ? `<span class="moodle-ai-context-status" title="${contextData.text.substring(0, 200)}"> Context active</span>`
           : `<span class="moodle-ai-context-status moodle-ai-context-status-none">No context</span>`;
-        
+
         const qImagesCount = response.loadedQuestionImagesCount || 0;
         const qImageStatus = qImagesCount > 0
           ? `<span class="moodle-ai-context-status">🖼️ ${qImagesCount} question image${qImagesCount > 1 ? "s" : ""}</span>`
@@ -884,7 +884,7 @@
   async function loadHistoryBadge() {
     try {
       if (!isExtensionValid()) return;
-      
+
       const sessionId = getSessionId();
       const info = await safeSendMessage({ action: "getHistoryInfo", sessionId });
       if (info && info.count > 0) {
@@ -949,7 +949,7 @@
   async function restoreActiveContext() {
     try {
       if (!isExtensionValid()) return;
-      
+
       const contextData = await loadContext();
       if (!contextData.text) return;
 
@@ -981,7 +981,7 @@
 
     const modal = document.createElement("div");
     modal.className = "moodle-ai-log-modal";
-    
+
     modal.innerHTML = `
       <div class="moodle-ai-log-modal-content">
         <div class="moodle-ai-log-modal-header">

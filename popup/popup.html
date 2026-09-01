@@ -10,7 +10,7 @@
       }
 
       body {
-        width: 320px;
+        width: 360px;
         padding: 20px;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         background: #f8f9fa;
@@ -36,17 +36,22 @@
         margin-bottom: 6px;
       }
 
-      input[type="password"] {
+      input[type="password"],
+      input[type="text"],
+      input[type="url"] {
         width: 100%;
         padding: 10px 12px;
         border: 1px solid #dadce0;
         border-radius: 6px;
         font-size: 13px;
-        font-family: monospace;
         transition: border-color 0.2s;
       }
 
-      input[type="password"]:focus {
+      input[type="password"] {
+        font-family: monospace;
+      }
+
+      input:focus {
         outline: none;
         border-color: #4285f4;
         box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
@@ -89,6 +94,20 @@
         background: #2a56c6;
       }
 
+      button:disabled {
+        opacity: 0.65;
+        cursor: wait;
+      }
+
+      .secondary-button {
+        margin-top: 8px;
+        background: #5f6368;
+      }
+
+      .secondary-button:hover {
+        background: #4b4f52;
+      }
+
       #status {
         margin-top: 12px;
         font-size: 12px;
@@ -110,7 +129,7 @@
         margin: 16px 0;
       }
 
-      .model-select {
+      .field {
         margin-bottom: 16px;
       }
 
@@ -153,26 +172,28 @@
   </head>
   <body>
     <h1>Moodle AI Assistant</h1>
-    <p class="subtitle">Powered by Google Gemini</p>
+    <p class="subtitle">Connect an OpenAI-compatible API</p>
 
     <div class="divider"></div>
 
-    <label for="apiKey">Gemini API Key</label>
-    <input type="password" id="apiKey" placeholder="Enter your API key" />
-    <p class="hint">
-      Get your free API key at
-      <a href="https://aistudio.google.com/app/apikey" target="_blank">Google AI Studio</a>
-    </p>
+    <div class="field">
+      <label for="endpoint">OpenAI API URL</label>
+      <input type="url" id="endpoint" placeholder="https://example.com/v1" />
+      <p class="hint">You can enter a base URL such as <code>http://localhost:11434/v1</code>, a <code>/models</code> URL, or the full <code>/chat/completions</code> URL.</p>
+    </div>
 
-    <div class="model-select">
+    <div class="field">
+      <label for="apiKey">API key (optional)</label>
+      <input type="password" id="apiKey" placeholder="Bearer token, if required" autocomplete="off" />
+      <p class="hint">Sent as <code>Authorization: Bearer <key></code>. Leave blank if authentication is disabled.</p>
+    </div>
+
+    <div class="field">
       <label for="model">Model</label>
-      <select id="model">
-        <option value="gemini-2.0-flash">Gemini 2.0 Flash (Recommended)</option>
-        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-        <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
-        <option value="gemma-4-31b">Gemma 4 31B</option>
-      </select>
+      <input type="text" id="model" list="availableModels" placeholder="Select or enter a model" />
+      <datalist id="availableModels"></datalist>
+      <button type="button" id="loadModelsBtn" class="secondary-button">Load Models from Endpoint</button>
+      <p class="hint" id="modelsHint">The models URL is derived from the endpoint, usually as <code>/v1/models</code>.</p>
     </div>
 
     <div class="autofill-toggle">

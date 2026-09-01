@@ -11,6 +11,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     ).then(sendResponse);
     return true;
   }
+  if (request.action === "getModels") {
+    handleGetModels(request.endpoint, request.apiKey || "").then(sendResponse);
+    return true;
+  }
   if (request.action === "clearHistory") {
     clearHistory(request.sessionId).then(sendResponse);
     return true;
@@ -28,7 +32,7 @@ async function fetchImageAsBase64(url) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const blob = await response.blob();
     const buffer = await blob.arrayBuffer();
-    
+
     // Convert arrayBuffer to base64
     let binary = '';
     const bytes = new Uint8Array(buffer);
@@ -37,7 +41,7 @@ async function fetchImageAsBase64(url) {
       binary += String.fromCharCode(bytes[i]);
     }
     const base64Data = btoa(binary);
-    
+
     return {
       mimeType: blob.type || "image/jpeg",
       data: base64Data
@@ -49,17 +53,29 @@ async function fetchImageAsBase64(url) {
 }
 
 async function handleGetAnswer(question, questionImageUrls, context, contextImageUrls, sessionId) {
-  const { apiKey, model } = await chrome.storage.sync.get(["apiKey", "model"]);
-  if (!apiKey) {
-    return { error: "API key not set. Please configure it in the extension popup." };
+  const settings = await chrome.storage.sync.get([
+    "apiKey",
+    "model",
+    "customApiKey",
+    "customModel",
+    "endpoint",
+  ]);
+  const apiKey = settings.customApiKey ?? settings.apiKey ?? "";
+  const selectedModel = settings.customModel || settings.model || "";
+  const endpoint = (settings.endpoint || "").trim();
+
+  if (!endpoint) {
+    return { error: "API endpoint not set. Please configure it in the extension popup." };
   }
 
-  const selectedModel = model || "gemini-2.0-flash";
-  const history = await getOrCreateHistory(sessionId, context, contextImageUrls);
+  if (!selectedModel) {
+    return { error: "Model not set. Please configure it in the extension popup." };
+  }
 
+  const history = await getOrCreateHistory(sessionId, context, contextImageUrls);
   const isFirstMessage = history.messages.length === 0;
 
-  // Resolve images in background
+  // Resolve images in background to avoid content-script CORS restrictions.
   const questionImages = [];
   for (const url of questionImageUrls) {
     const imgData = await fetchImageAsBase64(url);
@@ -76,31 +92,27 @@ async function handleGetAnswer(question, questionImageUrls, context, contextImag
 
   const hasContextImages = contextImages.length > 0;
   const hasQuestionImages = questionImages.length > 0;
-
   const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null, hasContextImages, hasQuestionImages);
-  
   const parts = [{ text: userPrompt }];
-  
-  // Attach context images on first message
+
   if (isFirstMessage && hasContextImages) {
     contextImages.forEach((img) => {
       parts.push({
         inline_data: {
           mime_type: img.mimeType,
-          data: img.data
-        }
+          data: img.data,
+        },
       });
     });
   }
 
-  // Attach question images for this specific question
   if (hasQuestionImages) {
     questionImages.forEach((img) => {
       parts.push({
         inline_data: {
           mime_type: img.mimeType,
-          data: img.data
-        }
+          data: img.data,
+        },
       });
     });
   }
@@ -108,52 +120,212 @@ async function handleGetAnswer(question, questionImageUrls, context, contextImag
   history.messages.push({ role: "user", parts });
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify({
-        contents: history.messages.map((m) => ({ role: m.role, parts: m.parts })),
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 1024,
-          topP: 0.95,
-        },
-      }),
-    });
+    const answer = await requestOpenAICompatible(endpoint, apiKey, selectedModel, history.messages);
 
+    history.messages.push({ role: "model", parts: [{ text: answer }] });
+    await saveHistory(sessionId, history);
+
+    return {
+      answer,
+      historyCount: Math.floor(history.messages.length / 2),
+      prompt: userPrompt,
+      loadedQuestionImagesCount: questionImages.length,
+    };
+  } catch (err) {
+    // Do not retain a failed user request in the in-memory conversation.
+    history.messages.pop();
+    return { error: err.message };
+  }
+}
+
+async function handleGetModels(endpoint, apiKey) {
+  try {
+    const chatEndpoint = deriveChatCompletionsEndpoint(parseApiUrl(endpoint));
+    const modelsEndpoint = deriveModelsEndpoint(chatEndpoint);
+    const headers = {};
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(modelsEndpoint.toString(), { method: "GET", headers });
     if (!response.ok) {
-      let errorMsg = response.statusText;
-      try {
-        const errorData = await response.json();
-        if (errorData.error?.message) {
-          errorMsg = errorData.error.message;
-        }
-      } catch (_) {}
-      return { error: `Gemini API error: ${errorMsg}` };
+      throw new Error(`Models API error: ${await getApiErrorMessage(response)}`);
     }
 
     const data = await response.json();
-    const answer = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const models = extractModelIds(data);
+    return { models, modelsEndpoint: modelsEndpoint.toString() };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
 
-    if (!answer) {
-      return { error: "No answer received from Gemini." };
+function parseApiUrl(endpoint) {
+  let endpointUrl;
+  try {
+    endpointUrl = new URL(endpoint);
+  } catch (_) {
+    throw new Error("API endpoint is not a valid URL.");
+  }
+
+  if (!["http:", "https:"].includes(endpointUrl.protocol)) {
+    throw new Error("API endpoint must use HTTP or HTTPS.");
+  }
+
+  return endpointUrl;
+}
+
+function deriveChatCompletionsEndpoint(endpointUrl) {
+  const chatEndpoint = new URL(endpointUrl.toString());
+  const path = chatEndpoint.pathname.replace(/\/+$/, "");
+
+  if (/\/chat\/completions$/i.test(path)) {
+    chatEndpoint.pathname = path;
+  } else if (/\/models$/i.test(path)) {
+    chatEndpoint.pathname = path.replace(/\/models$/i, "/chat/completions");
+  } else if (/\/completions$/i.test(path)) {
+    chatEndpoint.pathname = path.replace(/\/completions$/i, "/chat/completions");
+  } else if (/\/responses$/i.test(path)) {
+    chatEndpoint.pathname = path.replace(/\/responses$/i, "/chat/completions");
+  } else if (!path) {
+    chatEndpoint.pathname = "/v1/chat/completions";
+  } else {
+    chatEndpoint.pathname = `${path}/chat/completions`;
+  }
+
+  chatEndpoint.search = "";
+  chatEndpoint.hash = "";
+  return chatEndpoint;
+}
+
+function deriveModelsEndpoint(chatEndpoint) {
+  const modelsEndpoint = new URL(chatEndpoint.toString());
+  const path = modelsEndpoint.pathname.replace(/\/+$/, "");
+
+  if (/\/chat\/completions$/i.test(path)) {
+    modelsEndpoint.pathname = path.replace(/\/chat\/completions$/i, "/models");
+  } else if (/\/models$/i.test(path)) {
+    modelsEndpoint.pathname = path;
+  } else {
+    modelsEndpoint.pathname = `${path}/models`;
+  }
+
+  modelsEndpoint.search = "";
+  modelsEndpoint.hash = "";
+  return modelsEndpoint;
+}
+
+function extractModelIds(data) {
+  const candidates = Array.isArray(data)
+    ? data
+    : (Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : []));
+
+  return [...new Set(candidates
+    .map((model) => typeof model === "string" ? model : (model?.id || model?.name || model?.model))
+    .filter((model) => typeof model === "string" && model.trim())
+    .map((model) => model.trim()))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function requestOpenAICompatible(endpoint, apiKey, model, messages) {
+  const endpointUrl = deriveChatCompletionsEndpoint(parseApiUrl(endpoint));
+
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  const response = await fetch(endpointUrl.toString(), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      messages: messages.map(convertMessageToOpenAI),
+      temperature: 0.3,
+      max_tokens: 1024,
+      top_p: 0.95,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`API error at ${endpointUrl.toString()}: ${await getApiErrorMessage(response)}`);
+  }
+
+  const data = await response.json();
+  const rawContent = data.choices?.[0]?.message?.content
+    ?? data.choices?.[0]?.text
+    ?? data.answer
+    ?? data.response
+    ?? data.content;
+  const answer = normalizeApiAnswer(rawContent);
+
+  if (!answer) {
+    throw new Error("No answer received from the API.");
+  }
+
+  return answer;
+}
+
+function convertMessageToOpenAI(message) {
+  const role = message.role === "model" ? "assistant" : message.role;
+  const hasImages = message.parts.some((part) => part.inline_data);
+
+  if (!hasImages) {
+    return {
+      role,
+      content: message.parts.map((part) => part.text || "").join("\n"),
+    };
+  }
+
+  const content = message.parts.map((part) => {
+    if (part.text !== undefined) {
+      return { type: "text", text: part.text };
     }
 
-    history.messages.push({ role: "model", parts: [{ text: answer }] });
+    if (part.inline_data) {
+      return {
+        type: "image_url",
+        image_url: {
+          url: `data:${part.inline_data.mime_type};base64,${part.inline_data.data}`,
+        },
+      };
+    }
 
-    await saveHistory(sessionId, history);
+    return null;
+  }).filter(Boolean);
 
-    return { 
-      answer, 
-      historyCount: Math.floor(history.messages.length / 2), 
-      prompt: userPrompt,
-      loadedQuestionImagesCount: questionImages.length
-    };
-  } catch (err) {
-    return { error: `Network error: ${err.message}` };
+  return { role, content };
+}
+
+function normalizeApiAnswer(content) {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => typeof part === "string" ? part : (part?.text || part?.content || ""))
+      .join("")
+      .trim();
+  }
+
+  return "";
+}
+
+async function getApiErrorMessage(response) {
+  const fallback = `${response.status} ${response.statusText}`.trim();
+  const responseText = await response.text();
+
+  if (!responseText) return fallback;
+
+  try {
+    const errorData = JSON.parse(responseText);
+    return errorData.error?.message
+      || errorData.message
+      || errorData.detail
+      || fallback;
+  } catch (_) {
+    return responseText.slice(0, 500);
   }
 }
 
@@ -162,7 +334,7 @@ async function getOrCreateHistory(sessionId, context, contextImageUrls) {
     const existing = conversationHistories[sessionId];
     const contextChanged = context && existing.context !== context;
     const imagesChanged = contextImageUrls && JSON.stringify(existing.contextImageUrls) !== JSON.stringify(contextImageUrls);
-    
+
     if (contextChanged || imagesChanged) {
       conversationHistories[sessionId] = { context, contextImageUrls, messages: [] };
     }
@@ -175,7 +347,7 @@ async function getOrCreateHistory(sessionId, context, contextImageUrls) {
   if (allHistories[sessionId]) {
     const contextChanged = context && allHistories[sessionId].context !== context;
     const imagesChanged = contextImageUrls && JSON.stringify(allHistories[sessionId].contextImageUrls) !== JSON.stringify(contextImageUrls);
-    
+
     if (contextChanged || imagesChanged) {
       allHistories[sessionId] = { context, contextImageUrls, messages: [] };
     }
@@ -220,8 +392,8 @@ async function clearHistory(sessionId) {
 async function getHistoryInfo(sessionId) {
   if (conversationHistories[sessionId]) {
     const msgCount = conversationHistories[sessionId].messages.length;
-    return { 
-      count: Math.floor(msgCount / 2), 
+    return {
+      count: Math.floor(msgCount / 2),
       hasContext: !!conversationHistories[sessionId].context,
       hasMedia: conversationHistories[sessionId].contextImageUrls?.length > 0
     };
@@ -231,8 +403,8 @@ async function getHistoryInfo(sessionId) {
   const allHistories = stored.sessionHistories || {};
   if (allHistories[sessionId]) {
     const msgCount = allHistories[sessionId].messages.length;
-    return { 
-      count: Math.floor(msgCount / 2), 
+    return {
+      count: Math.floor(msgCount / 2),
       hasContext: !!allHistories[sessionId].context,
       hasMedia: allHistories[sessionId].contextImageUrls?.length > 0
     };
@@ -275,7 +447,7 @@ function buildUserPrompt(question, context, hasContextImages, hasQuestionImages)
   }
 
   const instructions = [];
-  
+
   switch (question.type) {
     case "Multiple Choice (Single)":
       instructions.push("Select exactly ONE correct option.");

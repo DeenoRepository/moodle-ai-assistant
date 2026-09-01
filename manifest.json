@@ -1,16 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Moodle AI Assistant",
-  "version": "1.2.0",
-  "description": "Uses Google Gemini AI to find correct answers for Moodle quiz questions",
+  "version": "1.4.0",
+  "description": "Uses a configurable OpenAI-compatible API to answer Moodle quiz questions",
   "permissions": [
     "storage",
     "activeTab"
   ],
   "host_permissions": [
-    "https://*.moodle.org/*",
-    "https://*.moodlecloud.com/*",
-    "https://*.googleapis.com/*"
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background/service-worker.js"
