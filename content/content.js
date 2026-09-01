@@ -90,57 +90,66 @@
   }
 
   function cleanOptionText(text) {
-    return text
-      .replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '') // remove Moodle status
-      .replace(/^[a-z0-9а-яё][\.\)\s-]+\s*/i, '') // remove prefixes like "a.", "1.", "a)", "а)" (Cyrillic and English)
-      .replace(/[\s\xa0]+/g, ' ') // normalize all spaces and non-breaking spaces
+    return String(text || "")
+      .replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, "")
+      .replace(/^[a-z0-9а-яё][\.\)\s-]+\s*/i, "")
+      .replace(/[\s\xa0]+/g, " ")
       .trim();
   }
 
   function cleanTextForMatching(text) {
-    let cleaned = text.toLowerCase();
-
-    // Normalize Latin lookalikes (homoglyphs) to Cyrillic to prevent mixed-script matching failures
-    const homoglyphs = {
-      'a': 'а',
-      'c': 'с',
-      'e': 'е',
-      'i': 'і',
-      'k': 'к',
-      'm': 'м',
-      'o': 'о',
-      'p': 'р',
-      's': 'с',
-      'x': 'х',
-      'y': 'у'
-    };
-
-    cleaned = cleaned.split('').map(char => homoglyphs[char] || char).join('');
-
-    return cleaned
-      .replace(/[^a-z0-9а-яёі]/gi, '')
+    return cleanOptionText(text)
+      .normalize("NFKC")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .replace(/\s+/g, " ")
       .trim();
   }
 
-  function getElementTextWithoutSelects(element) {
+  function getAccessibleText(element) {
+    if (!element) return "";
     const clone = element.cloneNode(true);
-    clone.querySelectorAll("select, button, .moodle-ai-btn-wrapper, .moodle-ai-answer").forEach(el => el.remove());
-    return clone.innerText.trim();
+    clone.querySelectorAll("img").forEach((img) => {
+      const description = img.getAttribute("alt") || img.getAttribute("title") || "";
+      img.replaceWith(clone.ownerDocument.createTextNode(description ? ` ${description} ` : " "));
+    });
+    clone.querySelectorAll("audio, video").forEach((media) => {
+      const description = media.getAttribute("aria-label") || media.getAttribute("title") || "media attachment";
+      media.replaceWith(clone.ownerDocument.createTextNode(` [${description}] `));
+    });
+    clone.querySelectorAll("select, button, .moodle-ai-btn-wrapper, .moodle-ai-answer").forEach((el) => el.remove());
+    return (clone.innerText || clone.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function getElementTextWithoutSelects(element) {
+    return getAccessibleText(element);
   }
 
   function getInputLabelText(input, formulation) {
     if (input.id) {
-      const label = formulation.querySelector(`label[for="${input.id}"]`);
-      if (label && label.innerText.trim()) return label.innerText;
+      const label = formulation.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+      const labelText = getAccessibleText(label);
+      if (labelText) return labelText;
     }
 
     const parentLabel = input.closest("label");
-    if (parentLabel && parentLabel.innerText.trim()) return parentLabel.innerText;
+    const parentLabelText = getAccessibleText(parentLabel);
+    if (parentLabelText) return parentLabelText;
+
+    const ariaLabel = input.getAttribute("aria-label");
+    if (ariaLabel) return ariaLabel.trim();
+
+    const labelledBy = input.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const text = labelledBy.split(/\s+/).map((id) => getAccessibleText(document.getElementById(id))).filter(Boolean).join(" ");
+      if (text) return text;
+    }
 
     let sibling = input.nextElementSibling;
     while (sibling) {
       if (sibling.tagName === "LABEL" || sibling.className.includes("label") || sibling.className.includes("text")) {
-        if (sibling.innerText.trim()) return sibling.innerText;
+        const siblingText = getAccessibleText(sibling);
+        if (siblingText) return siblingText;
       }
       sibling = sibling.nextElementSibling;
     }
@@ -148,105 +157,126 @@
     const container = input.closest(".r0, .r1, .option, .answer, [class*='option'], [class*='choice']");
     if (container) {
       const clone = container.cloneNode(true);
-      clone.querySelectorAll('input').forEach(el => el.remove());
-      return clone.innerText;
+      clone.querySelectorAll("input, select").forEach((el) => el.remove());
+      return getAccessibleText(clone);
     }
 
     return "";
   }
 
-  function clickInput(input, formulation) {
+  function setInputChecked(input, checked, formulation) {
+    if (input.checked === checked || input.disabled) return;
+
     if (input.id) {
-      const label = formulation.querySelector(`label[for="${input.id}"]`);
-      if (label) {
-        label.click();
-        return;
-      }
+      const label = formulation.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+      if (label) label.click();
+    } else {
+      const parentLabel = input.closest("label");
+      if (parentLabel) parentLabel.click();
+      else input.click();
     }
 
-    const parentLabel = input.closest("label");
-    if (parentLabel) {
-      parentLabel.click();
-      return;
+    if (input.checked !== checked) {
+      input.checked = checked;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  }
 
-    input.click();
+  function setControlValue(control, value) {
+    if (!control || control.disabled) return;
+    const prototype = control instanceof HTMLSelectElement
+      ? HTMLSelectElement.prototype
+      : control instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (setter) setter.call(control, value);
+    else control.value = value;
+    control.dispatchEvent(new Event("input", { bubbles: true }));
+    control.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   function getMathText(element) {
-    // 1. Check for MathJax v3 data-tex attribute (very common in modern Moodle)
-    const mathJaxV3Containers = element.querySelectorAll('[data-tex]');
-    if (mathJaxV3Containers.length > 0) {
-      let texTexts = [];
-      mathJaxV3Containers.forEach(container => {
-        texTexts.push(container.getAttribute('data-tex').trim());
-      });
-      return texTexts.join(' ');
-    }
-
-    // 2. Check for MathJax v2 script tags (older Moodle)
-    const mathJaxScripts = element.querySelectorAll('script[type^="math/tex"]');
-    if (mathJaxScripts.length > 0) {
-      let scriptTexts = [];
-      mathJaxScripts.forEach(script => {
-        scriptTexts.push(script.textContent.trim());
-      });
-      return scriptTexts.join(' ');
-    }
-
-    // 3. Check for LaTeX images (Moodle Tex filter)
-    const texImages = element.querySelectorAll('img.tex, img.latex, img[class*="tex"]');
-    if (texImages.length > 0) {
-      let altTexts = [];
-      texImages.forEach(img => {
-        if (img.alt) altTexts.push(img.alt.trim());
-      });
-      if (altTexts.length > 0) return altTexts.join(' ');
-    }
-
-    // 4. Check for MathML annotations
-    const annotations = element.querySelectorAll('annotation[encoding*="tex"]');
-    if (annotations.length > 0) {
-      let annotationTexts = [];
-      annotations.forEach(ann => {
-        annotationTexts.push(ann.textContent.trim());
-      });
-      return annotationTexts.join(' ');
-    }
-
-    // 5. Fallback to text content without interactive elements
-    return getElementTextWithoutSelects(element);
+    if (!element) return "";
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll('[data-tex]').forEach((node) => {
+      node.replaceWith(clone.ownerDocument.createTextNode(` ${node.getAttribute("data-tex") || ""} `));
+    });
+    clone.querySelectorAll('script[type^="math/tex"]').forEach((node) => {
+      node.replaceWith(clone.ownerDocument.createTextNode(` ${node.textContent || ""} `));
+    });
+    clone.querySelectorAll('annotation[encoding*="tex"]').forEach((node) => {
+      node.replaceWith(clone.ownerDocument.createTextNode(` ${node.textContent || ""} `));
+    });
+    return getAccessibleText(clone);
   }
 
-  function extractMediaUrlsFromElement(element) {
-    const urls = [];
-    const images = element.querySelectorAll("img");
-    images.forEach((img) => {
-      // Filter out small icons like question mark or checkmark icons
-      if (img.src && !img.src.startsWith("data:") && img.naturalWidth !== 16 && img.naturalHeight !== 16) {
-        urls.push(img.src);
-      }
+  function inferMediaType(url, mimeType = "") {
+    if (mimeType.startsWith("image/")) return "image";
+    if (mimeType.startsWith("audio/")) return "audio";
+    if (mimeType.startsWith("video/")) return "video";
+    const pathname = (() => { try { return new URL(url, location.href).pathname; } catch (_) { return url; } })().toLowerCase();
+    if (/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(pathname)) return "image";
+    if (/\.(mp3|wav|ogg|oga|m4a|aac|flac|webm)$/i.test(pathname)) return "audio";
+    if (/\.(mp4|m4v|webm|mov|avi|mkv|ogv)$/i.test(pathname)) return "video";
+    return null;
+  }
+
+  function extractMediaFromElement(element) {
+    const media = [];
+    const seen = new Set();
+    const add = (type, rawUrl, mimeType = "", label = "") => {
+      if (!rawUrl) return;
+      let url;
+      try { url = new URL(rawUrl, location.href).href; } catch (_) { return; }
+      const resolvedType = type || inferMediaType(url, mimeType);
+      if (!resolvedType || seen.has(`${resolvedType}:${url}`)) return;
+      seen.add(`${resolvedType}:${url}`);
+      media.push({ type: resolvedType, url, mimeType, label: cleanOptionText(label) });
+    };
+
+    element.querySelectorAll("img").forEach((img) => {
+      if (img.closest(".moodle-ai-btn-wrapper, .moodle-ai-answer")) return;
+      const width = img.naturalWidth || Number(img.getAttribute("width")) || 0;
+      const height = img.naturalHeight || Number(img.getAttribute("height")) || 0;
+      const decorative = img.getAttribute("role") === "presentation" || img.getAttribute("aria-hidden") === "true";
+      if (decorative || (width > 0 && height > 0 && width <= 24 && height <= 24)) return;
+      add("image", img.currentSrc || img.src, img.getAttribute("type") || "", img.alt || img.title || "");
     });
-    return urls;
+
+    element.querySelectorAll("audio, video").forEach((node) => {
+      const type = node.tagName.toLowerCase();
+      add(type, node.currentSrc || node.src, node.getAttribute("type") || "", node.getAttribute("aria-label") || node.title || "");
+      node.querySelectorAll("source").forEach((source) => add(type, source.src, source.type || "", node.getAttribute("aria-label") || node.title || ""));
+    });
+
+    element.querySelectorAll("a[href]").forEach((link) => {
+      const type = inferMediaType(link.href, link.type || "");
+      if (type) add(type, link.href, link.type || "", getAccessibleText(link));
+    });
+
+    return media;
   }
 
   async function loadContext() {
-    const { context, contextUrl, contextImageUrls } = await chrome.storage.local.get(["context", "contextUrl", "contextImageUrls"]);
+    const { context, contextUrl, contextMedia, contextImageUrls } = await chrome.storage.local.get(["context", "contextUrl", "contextMedia", "contextImageUrls"]);
     const currentUrl = window.location.origin + window.location.pathname;
     if (contextUrl !== currentUrl) {
-      await chrome.storage.local.remove(["context", "contextUrl", "contextImageUrls"]);
-      return { text: null, imageUrls: [] };
+      await chrome.storage.local.remove(["context", "contextUrl", "contextMedia", "contextImageUrls"]);
+      return { text: null, media: [] };
     }
-    return { text: context || null, imageUrls: contextImageUrls || [] };
+    const legacyMedia = (contextImageUrls || []).map((url) => ({ type: "image", url }));
+    return { text: context || null, media: contextMedia || legacyMedia };
   }
 
-  async function setContext(text, element, imageUrls = []) {
+  async function setContext(text, element, media = []) {
     const currentUrl = window.location.origin + window.location.pathname;
 
     await chrome.storage.local.set({
       context: text,
       contextUrl: currentUrl,
-      contextImageUrls: imageUrls
+      contextMedia: media
     });
     activeContextEl = element;
     element.classList.add("moodle-ai-context-active");
@@ -255,7 +285,7 @@
   }
 
   async function clearContext() {
-    await chrome.storage.local.remove(["context", "contextUrl", "contextImageUrls"]);
+    await chrome.storage.local.remove(["context", "contextUrl", "contextMedia", "contextImageUrls"]);
     if (activeContextEl) {
       activeContextEl.classList.remove("moodle-ai-context-active");
       activeContextEl = null;
@@ -274,55 +304,45 @@
   }
 
   function detectQuestionType(formulation) {
-    const hasRadio = formulation.querySelector('input[type="radio"]');
-    const hasCheckbox = formulation.querySelector('input[type="checkbox"]');
-    const hasTextInput = formulation.querySelector('input[type="text"]');
-    const hasTextarea = formulation.querySelector("textarea");
-    const selects = formulation.querySelectorAll("select");
-    const hasSelect = selects.length > 0;
+    const radios = [...formulation.querySelectorAll('input[type="radio"]')].filter((input) => !input.disabled);
+    const checkboxes = [...formulation.querySelectorAll('input[type="checkbox"]')].filter((input) => !input.disabled);
+    const textInputs = formulation.querySelectorAll('input[type="text"], input[type="number"], input:not([type])');
+    const hasTextarea = !!formulation.querySelector("textarea, [contenteditable='true']");
+    const selects = [...formulation.querySelectorAll("select")].filter((select) => !select.disabled);
+    const classText = `${formulation.className} ${formulation.closest(".que")?.className || ""}`.toLowerCase();
 
-    const trueFalseText = formulation.textContent;
-    const isTrueFalse = /\b(true|false)\b/i.test(trueFalseText) && (hasRadio || hasCheckbox);
+    const radioLabels = radios.map((input) => cleanTextForMatching(getInputLabelText(input, formulation)));
+    const trueWords = /^(true|yes|да|верно|правильно)$/u;
+    const falseWords = /^(false|no|нет|неверно|неправильно)$/u;
+    const isTrueFalse = /truefalse/.test(classText)
+      || (radioLabels.length === 2 && radioLabels.some((text) => trueWords.test(text)) && radioLabels.some((text) => falseWords.test(text)));
 
-    if (isTrueFalse && (hasRadio || hasCheckbox)) return "True/False";
-    if (hasCheckbox) return "Multiple Choice (Multiple)";
-    if (hasRadio) return "Multiple Choice (Single)";
+    if (isTrueFalse) return "True/False";
+    if (checkboxes.length > 0) return "Multiple Choice (Multiple)";
+    if (radios.length > 0) return "Multiple Choice (Single)";
 
-    if (hasSelect && selects.length > 1) {
-      const firstSelect = selects[0];
-      const options = firstSelect.querySelectorAll("option");
-      const hasNumericOptions = Array.from(options).some((opt) => /^\d+$/.test(opt.text.trim()));
-      const hasOrderKeywords = /order|sequence|sort|rank|arrange/i.test(formulation.textContent);
-
-      if (hasNumericOptions || hasOrderKeywords) {
-        return "Ordering";
-      }
+    if (selects.length > 1) {
+      const allNumeric = selects.every((select) => [...select.options].filter((option) => option.value).some((option) => /^\d+$/.test(option.text.trim())));
+      const orderingClass = /(ordering|order|sequence|sort|rank)/.test(classText);
+      if (allNumeric || orderingClass) return "Ordering";
       return "Matching";
     }
 
+    if (selects.length === 1) return "Dropdown";
     if (hasTextarea) return "Essay";
-    if (hasTextInput) return "Short Answer";
+    if (textInputs.length > 0) return "Short Answer";
     return "Unknown";
   }
 
   function extractQuestionData(formulation) {
     const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
-    let questionText = "";
-    let imageUrls = [];
-
-    if (questionTextEl) {
-      const clone = questionTextEl.cloneNode(true);
-      const inputs = clone.querySelectorAll('input[type="text"]');
-      inputs.forEach((input, index) => {
-        const placeholder = document.createTextNode(`[Input ${index + 1}]`);
-        input.parentNode.replaceChild(placeholder, input);
-      });
-      questionText = clone.innerText.trim();
-      imageUrls = extractMediaUrlsFromElement(questionTextEl);
-    } else {
-      questionText = formulation.innerText.trim();
-      imageUrls = extractMediaUrlsFromElement(formulation);
-    }
+    const textSource = questionTextEl || formulation;
+    const clone = textSource.cloneNode(true);
+    clone.querySelectorAll('input[type="text"], input[type="number"], input:not([type])').forEach((input, index) => {
+      input.replaceWith(clone.ownerDocument.createTextNode(`[Input ${index + 1}]`));
+    });
+    let questionText = getAccessibleText(clone);
+    const media = extractMediaFromElement(formulation);
 
     questionText = questionText
       .replace(/\s+/g, ' ')
@@ -331,7 +351,7 @@
       .trim();
 
     const type = detectQuestionType(formulation);
-    const data = { type, text: questionText, imageUrls };
+    const data = { type, text: questionText, media };
 
     if (type.includes("Multiple Choice") || type === "True/False") {
       const options = [];
@@ -355,6 +375,11 @@
 
       data.options = options;
       console.log("[Moodle AI] Extracted options:", options);
+    }
+
+    if (type === "Dropdown") {
+      const select = formulation.querySelector("select");
+      data.options = [...select.options].filter((option) => option.value).map((option) => cleanOptionText(option.text));
     }
 
     if (type === "Matching") {
@@ -397,199 +422,106 @@
   }
 
   function calculateSimilarity(str1, str2) {
-    if (!str1 || !str2) return 0;
+    const normalized1 = cleanTextForMatching(str1);
+    const normalized2 = cleanTextForMatching(str2);
+    if (!normalized1 || !normalized2) return 0;
+    if (normalized1 === normalized2) return 1;
 
-    const words1 = str1.split(/\s+/).filter(Boolean);
-    const words2 = str2.split(/\s+/).filter(Boolean);
+    const words1 = normalized1.split(" ").filter(Boolean);
+    const words2 = normalized2.split(" ").filter(Boolean);
+    const intersection = words1.filter((word) => words2.includes(word)).length;
+    const wordScore = intersection / Math.max(words1.length, words2.length);
+    const containmentScore = normalized1.includes(normalized2) || normalized2.includes(normalized1) ? 0.8 : 0;
+    return Math.max(wordScore, containmentScore);
+  }
 
-    if (words1.length === 0 || words2.length === 0) return 0;
-
-    let matches = 0;
-    words1.forEach(word1 => {
-      if (words2.some(word2 => word2.includes(word1) || word1.includes(word2))) {
-        matches++;
-      }
-    });
-
-    return matches / Math.max(words1.length, words2.length);
+  function findBestTextMatch(items, target, getText = (item) => item) {
+    const scored = items.map((item) => ({ item, score: calculateSimilarity(getText(item), target) }))
+      .sort((a, b) => b.score - a.score);
+    if (!scored[0] || scored[0].score < 0.72) return null;
+    if (scored[1] && scored[0].score < 1 && scored[0].score - scored[1].score < 0.12) return null;
+    return scored[0].item;
   }
 
   function autoFillAnswer(formulation, answer, questionType) {
-    const normalizedAnswer = answer.trim().toLowerCase();
+    const normalizedAnswer = cleanTextForMatching(answer);
 
     if (questionType === "True/False") {
-      const isTrue = /\btrue\b|верно|правильно|да|yes/i.test(normalizedAnswer);
-      const isFalse = /\bfalse\b|неверно|неправильно|нет|no/i.test(normalizedAnswer);
-
-      const inputs = formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]');
-      inputs.forEach((input) => {
-        const labelText = getInputLabelText(input, formulation);
-        if (!labelText) return;
-
-        const labelTextLower = labelText.trim().toLowerCase();
-        if (isTrue && (/\btrue\b|верно|правильно|да|yes/i.test(labelTextLower))) {
-          if (!input.checked) clickInput(input, formulation);
-        }
-        if (isFalse && (/\bfalse\b|неверно|неправильно|нет|no/i.test(labelTextLower))) {
-          if (!input.checked) clickInput(input, formulation);
-        }
+      const isTrue = /^(true|yes|да|верно|правильно)$/u.test(normalizedAnswer);
+      const isFalse = /^(false|no|нет|неверно|неправильно)$/u.test(normalizedAnswer);
+      if (!isTrue && !isFalse) return;
+      const inputs = [...formulation.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
+      const target = inputs.find((input) => {
+        const label = cleanTextForMatching(getInputLabelText(input, formulation));
+        return isTrue ? /^(true|yes|да|верно|правильно)$/u.test(label) : /^(false|no|нет|неверно|неправильно)$/u.test(label);
       });
+      if (target) setInputChecked(target, true, formulation);
+      return;
     }
 
     if (questionType.includes("Multiple Choice")) {
-      const isMultiple = questionType.includes("Multiple");
-      const inputs = formulation.querySelectorAll(
-        isMultiple ? 'input[type="checkbox"]' : 'input[type="radio"]'
-      );
-
+      const isMultiple = questionType === "Multiple Choice (Multiple)";
+      const inputs = [...formulation.querySelectorAll(isMultiple ? 'input[type="checkbox"]' : 'input[type="radio"]')];
       if (isMultiple) {
-        inputs.forEach((input) => {
-          if (input.checked) {
-            clickInput(input, formulation); // Uncheck via click to trigger listeners
-          }
+        const answerLines = answer.split(/\n/).map(cleanTextForMatching).filter(Boolean);
+        const targetInputs = new Set();
+        answerLines.forEach((line) => {
+          const target = findBestTextMatch(inputs, line, (input) => getInputLabelText(input, formulation));
+          if (target) targetInputs.add(target);
         });
-
-        const answerLines = normalizedAnswer
-          .split(/\n/)
-          .map((l) => cleanTextForMatching(cleanOptionText(l)))
-          .filter(Boolean);
-
-        inputs.forEach((input) => {
-          const labelText = getInputLabelText(input, formulation);
-          if (!labelText) return;
-
-          const labelTextClean = cleanTextForMatching(cleanOptionText(labelText));
-
-          const isMatch = answerLines.some((line) => {
-            return labelTextClean === line ||
-                   labelTextClean.includes(line) ||
-                   line.includes(labelTextClean);
-          });
-
-          if (isMatch && !input.checked) {
-            clickInput(input, formulation);
-          }
-        });
+        if (targetInputs.size !== answerLines.length) return;
+        inputs.forEach((input) => setInputChecked(input, targetInputs.has(input), formulation));
       } else {
-        const answerClean = cleanTextForMatching(cleanOptionText(answer));
-
-        inputs.forEach((input) => {
-          const labelText = getInputLabelText(input, formulation);
-          if (!labelText) return;
-
-          const labelTextClean = cleanTextForMatching(cleanOptionText(labelText));
-
-          if (labelTextClean === answerClean ||
-              labelTextClean.includes(answerClean) ||
-              answerClean.includes(labelTextClean)) {
-            if (!input.checked) {
-              clickInput(input, formulation);
-            }
-          }
-        });
+        const target = findBestTextMatch(inputs, answer, (input) => getInputLabelText(input, formulation));
+        if (target) setInputChecked(target, true, formulation);
       }
+      return;
+    }
+
+    if (questionType === "Dropdown") {
+      const select = formulation.querySelector("select");
+      const options = [...select.options].filter((option) => option.value);
+      const target = findBestTextMatch(options, answer, (option) => option.text);
+      if (target) setControlValue(select, target.value);
+      return;
     }
 
     if (questionType === "Short Answer" || questionType === "Essay") {
       const textarea = formulation.querySelector("textarea");
-      if (textarea) {
-        textarea.value = answer.trim();
-        textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        textarea.dispatchEvent(new Event("change", { bubbles: true }));
-      } else {
-        const textInputs = formulation.querySelectorAll('input[type="text"]');
-        const answerLines = answer.split('\n').map(l => l.trim()).filter(Boolean);
-
+      const contentEditable = formulation.querySelector("[contenteditable='true']");
+      if (contentEditable) {
+        contentEditable.textContent = answer.trim();
+        contentEditable.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: answer.trim() }));
+      }
+      if (textarea) setControlValue(textarea, answer.trim());
+      if (!textarea && !contentEditable) {
+        const textInputs = formulation.querySelectorAll('input[type="text"], input[type="number"], input:not([type])');
+        const answerLines = answer.split("\n").map((line) => line.trim()).filter(Boolean);
         textInputs.forEach((input, index) => {
-          if (index < answerLines.length) {
-            input.value = answerLines[index];
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-            input.dispatchEvent(new Event("change", { bubbles: true }));
-          }
+          if (index < answerLines.length) setControlValue(input, answerLines[index]);
         });
       }
+      return;
     }
 
     if (questionType === "Matching") {
-      const answerPairs = answer
-        .split(/\n/)
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map((line) => {
-          const parts = line.split(/\s*[-:]\s*/);
-          return parts.length >= 2 ? { item: parts[0].trim(), match: parts.slice(1).join("").trim() } : null;
-        })
-        .filter(Boolean);
+      const answerPairs = answer.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+        const separator = line.match(/\s(?:->|=>|:|—|-)+\s/);
+        if (!separator) return null;
+        const index = separator.index;
+        return { item: line.slice(0, index).trim(), match: line.slice(index + separator[0].length).trim() };
+      }).filter(Boolean);
 
-      const cleanFormulaForMatching = (text) => {
-        return text
-          .toLowerCase()
-          .replace(/\\frac|\\cdot|\\times/g, '')
-          .replace(/[^a-z0-9а-яё]/gi, '')
-          .trim();
-      };
-
-      const selects = formulation.querySelectorAll("select");
-      selects.forEach((select) => {
+      formulation.querySelectorAll("select").forEach((select) => {
         const row = select.closest("tr, div, li");
         if (!row) return;
-
-        const rowText = getMathText(row);
-        const cleanedRow = cleanFormulaForMatching(rowText);
-
-        let bestPair = null;
-        let highestScore = -1;
-
-        answerPairs.forEach((pair) => {
-          const cleanedItem = cleanFormulaForMatching(pair.item);
-          let score = 0;
-
-          if (cleanedRow === cleanedItem) {
-            score = 100;
-          } else if (cleanedRow.includes(cleanedItem) || cleanedItem.includes(cleanedRow)) {
-            score = 50 + calculateSimilarity(cleanedRow, cleanedItem);
-          } else {
-            score = calculateSimilarity(cleanedRow, cleanedItem) * 40;
-          }
-
-          if (score > highestScore && score > 10) {
-            highestScore = score;
-            bestPair = pair;
-          }
-        });
-
-        if (bestPair) {
-          const options = select.querySelectorAll("option");
-          const cleanedMatchTarget = cleanOptionText(bestPair.match).toLowerCase();
-
-          let bestOption = null;
-          let highestOptionScore = -1;
-
-          options.forEach((option) => {
-            if (!option.value) return;
-            const optionTextClean = cleanOptionText(option.text).toLowerCase();
-            let score = 0;
-
-            if (optionTextClean === cleanedMatchTarget) {
-              score = 100;
-            } else if (optionTextClean.includes(cleanedMatchTarget) || cleanedMatchTarget.includes(optionTextClean)) {
-              score = 50 + calculateSimilarity(optionTextClean, cleanedMatchTarget);
-            } else {
-              score = calculateSimilarity(optionTextClean, cleanedMatchTarget) * 40;
-            }
-
-            if (score > highestOptionScore && score > 10) {
-              highestOptionScore = score;
-              bestOption = option;
-            }
-          });
-
-          if (bestOption) {
-            select.value = bestOption.value;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
-          }
-        }
+        const bestPair = findBestTextMatch(answerPairs, getMathText(row), (pair) => pair.item);
+        if (!bestPair) return;
+        const options = [...select.options].filter((option) => option.value);
+        const bestOption = findBestTextMatch(options, bestPair.match, (option) => option.text);
+        if (bestOption) setControlValue(select, bestOption.value);
       });
+      return;
     }
 
     if (questionType === "Ordering") {
@@ -621,28 +553,13 @@
 
       const selects = formulation.querySelectorAll("select");
 
-      selects.forEach((select, selectIndex) => {
+      selects.forEach((select) => {
         const row = select.closest("tr, div, li, .answer, .flex-fill, .col-md-9");
         if (!row) return;
 
-        const rowTextClean = cleanOptionText(getMathText(row)).toLowerCase();
-
-        let targetPosition = null;
-
-        for (let i = 0; i < orderedItems.length; i++) {
-          const aiItemClean = orderedItems[i].text.toLowerCase().replace(/[^\w\s]/g, '');
-          const rowTextRaw = rowTextClean.replace(/[^\w\s]/g, '');
-
-          const similarity = calculateSimilarity(aiItemClean, rowTextRaw);
-          if (similarity > 0.5) {
-            targetPosition = orderedItems[i].position;
-            break;
-          }
-        }
-
-        if (!targetPosition && selectIndex < orderedItems.length) {
-          targetPosition = orderedItems[selectIndex].position;
-        }
+        const rowTextClean = cleanTextForMatching(getMathText(row));
+        const matchedItem = findBestTextMatch(orderedItems, rowTextClean, (item) => item.text);
+        const targetPosition = matchedItem?.position || null;
 
         if (targetPosition) {
           const options = select.querySelectorAll("option");
@@ -653,8 +570,7 @@
             const optValue = option.value.trim();
 
             if (optText === String(targetPosition) || optValue === String(targetPosition)) {
-              select.value = option.value;
-              select.dispatchEvent(new Event("change", { bubbles: true }));
+              setControlValue(select, option.value);
               matched = true;
               break;
             }
@@ -665,13 +581,13 @@
             if (positionNum > 0 && positionNum <= options.length) {
               const option = options[positionNum - 1];
               if (option && option.value) {
-                select.value = option.value;
-                select.dispatchEvent(new Event("change", { bubbles: true }));
+                setControlValue(select, option.value);
               }
             }
           }
         }
       });
+      return;
     }
   }
 
@@ -715,9 +631,9 @@
       const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
       const contextText = questionTextEl ? questionTextEl.innerText.trim() : formulation.innerText.trim();
 
-      const imageUrls = extractMediaUrlsFromElement(formulation);
+      const media = extractMediaFromElement(formulation);
 
-      await setContext(contextText, formulation, imageUrls);
+      await setContext(contextText, formulation, media);
     }
   }
 
@@ -750,9 +666,9 @@
       const response = await safeSendMessage({
         action: "getAnswer",
         question: questionData,
-        questionImageUrls: questionData.imageUrls,
+        questionMedia: questionData.media,
         context: contextData.text,
-        contextImageUrls: contextData.imageUrls,
+        contextMedia: contextData.media,
         sessionId,
       });
 
@@ -764,16 +680,17 @@
           ? `<span class="moodle-ai-context-status" title="${contextData.text.substring(0, 200)}"> Context active</span>`
           : `<span class="moodle-ai-context-status moodle-ai-context-status-none">No context</span>`;
 
-        const qImagesCount = response.loadedQuestionImagesCount || 0;
-        const qImageStatus = qImagesCount > 0
-          ? `<span class="moodle-ai-context-status">🖼️ ${qImagesCount} question image${qImagesCount > 1 ? "s" : ""}</span>`
-          : "";
+        const mediaCounts = response.loadedQuestionMediaCounts || {};
+        const qImageStatus = Object.entries(mediaCounts).map(([type, count]) => {
+          const icon = type === "image" ? "🖼️" : type === "audio" ? "🔊" : "🎬";
+          return `<span class="moodle-ai-context-status">${icon} ${count} ${escapeHtml(type)}</span>`;
+        }).join("");
 
         const parsed = parseResponse(response.answer);
-
-        let bodyHtml = `<div class="moodle-ai-answer-text" style="font-weight: 600; font-size: 1.1em;">${parsed.answer.replace(/\n/g, "<br>")}</div>`;
+        const safeAnswer = escapeHtml(parsed.answer).replace(/\n/g, "<br>");
+        let bodyHtml = `<div class="moodle-ai-answer-text" style="font-weight: 600; font-size: 1.1em;">${safeAnswer}</div>`;
         if (parsed.reasoning) {
-          const formattedReasoning = renderLatexToHtml(parsed.reasoning);
+          const formattedReasoning = renderLatexToHtml(escapeHtml(parsed.reasoning));
           bodyHtml += `
             <details class="moodle-ai-reasoning-details" style="margin-top: 10px; border-top: 1px solid rgba(0,0,0,0.1); padding-top: 8px; font-size: 0.9em; color: #555;">
               <summary style="cursor: pointer; font-weight: 500; outline: none; margin-bottom: 5px; color: #2e7d32;">Show Solution / Решение</summary>

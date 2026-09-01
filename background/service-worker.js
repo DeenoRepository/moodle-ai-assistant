@@ -1,12 +1,16 @@
 const conversationHistories = {};
+const MAX_MEDIA_BYTES = 8 * 1024 * 1024;
+const MAX_MEDIA_ITEMS_PER_REQUEST = 8;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "getAnswer") {
+    const legacyQuestionMedia = (request.questionImageUrls || []).map((url) => ({ type: "image", url }));
+    const legacyContextMedia = (request.contextImageUrls || []).map((url) => ({ type: "image", url }));
     handleGetAnswer(
       request.question,
-      request.questionImageUrls || [],
+      request.questionMedia || legacyQuestionMedia,
       request.context,
-      request.contextImageUrls || [],
+      request.contextMedia || legacyContextMedia,
       request.sessionId
     ).then(sendResponse);
     return true;
@@ -25,34 +29,50 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-// Helper function to fetch images in background to bypass content script CORS issues
-async function fetchImageAsBase64(url) {
+async function fetchMediaAsBase64(media) {
   try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    const buffer = await blob.arrayBuffer();
-
-    // Convert arrayBuffer to base64
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    if (media.url.startsWith("data:")) {
+      const match = media.url.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+      if (!match) throw new Error("Invalid data URL");
+      const mimeType = match[1] || media.mimeType || "application/octet-stream";
+      const data = match[2] ? match[3] : btoa(decodeURIComponent(match[3]));
+      if (data.length * 0.75 > MAX_MEDIA_BYTES) throw new Error(`File is larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`);
+      const detectedType = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video" : media.type;
+      return { type: detectedType, mimeType, data, label: media.label || "" };
     }
-    const base64Data = btoa(binary);
 
-    return {
-      mimeType: blob.type || "image/jpeg",
-      data: base64Data
-    };
+    const response = await fetch(media.url, { credentials: "include" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const contentLength = Number(response.headers.get("content-length")) || 0;
+    if (contentLength > MAX_MEDIA_BYTES) throw new Error(`File is larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`);
+    const blob = await response.blob();
+    if (blob.size > MAX_MEDIA_BYTES) throw new Error(`File is larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`);
+    const mimeType = blob.type || media.mimeType || "application/octet-stream";
+    const detectedType = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video" : media.type;
+    if (!["image", "audio", "video"].includes(detectedType)) throw new Error(`Unsupported MIME type: ${mimeType}`);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return { type: detectedType, mimeType, data: btoa(binary), label: media.label || "" };
   } catch (error) {
-    console.error(`Failed to fetch image from ${url}:`, error);
+    console.error(`Failed to fetch media from ${media.url}:`, error);
     return null;
   }
 }
 
-async function handleGetAnswer(question, questionImageUrls, context, contextImageUrls, sessionId) {
+async function loadMedia(mediaItems) {
+  const loaded = [];
+  for (const media of mediaItems.slice(0, MAX_MEDIA_ITEMS_PER_REQUEST)) {
+    const data = await fetchMediaAsBase64(media);
+    if (data) loaded.push(data);
+  }
+  return loaded;
+}
+
+async function handleGetAnswer(question, questionMediaItems, context, contextMediaItems, sessionId) {
   const settings = await chrome.storage.sync.get([
     "apiKey",
     "model",
@@ -72,50 +92,23 @@ async function handleGetAnswer(question, questionImageUrls, context, contextImag
     return { error: "Model not set. Please configure it in the extension popup." };
   }
 
-  const history = await getOrCreateHistory(sessionId, context, contextImageUrls);
+  const history = await getOrCreateHistory(sessionId, context, contextMediaItems);
   const isFirstMessage = history.messages.length === 0;
-
-  // Resolve images in background to avoid content-script CORS restrictions.
-  const questionImages = [];
-  for (const url of questionImageUrls) {
-    const imgData = await fetchImageAsBase64(url);
-    if (imgData) questionImages.push(imgData);
-  }
-
-  const contextImages = [];
-  if (isFirstMessage) {
-    for (const url of contextImageUrls) {
-      const imgData = await fetchImageAsBase64(url);
-      if (imgData) contextImages.push(imgData);
-    }
-  }
-
-  const hasContextImages = contextImages.length > 0;
-  const hasQuestionImages = questionImages.length > 0;
-  const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null, hasContextImages, hasQuestionImages);
+  const questionMedia = await loadMedia(questionMediaItems);
+  const contextMedia = isFirstMessage ? await loadMedia(contextMediaItems) : [];
+  const userPrompt = buildUserPrompt(question, isFirstMessage ? context : null, contextMedia, questionMedia);
   const parts = [{ text: userPrompt }];
 
-  if (isFirstMessage && hasContextImages) {
-    contextImages.forEach((img) => {
-      parts.push({
-        inline_data: {
-          mime_type: img.mimeType,
-          data: img.data,
-        },
-      });
+  [...contextMedia, ...questionMedia].forEach((media) => {
+    parts.push({
+      inline_data: {
+        media_type: media.type,
+        mime_type: media.mimeType,
+        data: media.data,
+        label: media.label,
+      },
     });
-  }
-
-  if (hasQuestionImages) {
-    questionImages.forEach((img) => {
-      parts.push({
-        inline_data: {
-          mime_type: img.mimeType,
-          data: img.data,
-        },
-      });
-    });
-  }
+  });
 
   history.messages.push({ role: "user", parts });
 
@@ -129,7 +122,10 @@ async function handleGetAnswer(question, questionImageUrls, context, contextImag
       answer,
       historyCount: Math.floor(history.messages.length / 2),
       prompt: userPrompt,
-      loadedQuestionImagesCount: questionImages.length,
+      loadedQuestionMediaCounts: questionMedia.reduce((counts, media) => {
+        counts[media.type] = (counts[media.type] || 0) + 1;
+        return counts;
+      }, {}),
     };
   } catch (err) {
     // Do not retain a failed user request in the in-memory conversation.
@@ -268,31 +264,37 @@ async function requestOpenAICompatible(endpoint, apiKey, model, messages) {
 
 function convertMessageToOpenAI(message) {
   const role = message.role === "model" ? "assistant" : message.role;
-  const hasImages = message.parts.some((part) => part.inline_data);
+  const hasMedia = message.parts.some((part) => part.inline_data);
 
-  if (!hasImages) {
+  if (!hasMedia) {
     return {
       role,
       content: message.parts.map((part) => part.text || "").join("\n"),
     };
   }
 
-  const content = message.parts.map((part) => {
+  const content = [];
+  message.parts.forEach((part) => {
     if (part.text !== undefined) {
-      return { type: "text", text: part.text };
+      content.push({ type: "text", text: part.text });
+      return;
     }
 
-    if (part.inline_data) {
-      return {
-        type: "image_url",
-        image_url: {
-          url: `data:${part.inline_data.mime_type};base64,${part.inline_data.data}`,
-        },
-      };
+    if (!part.inline_data) return;
+    const media = part.inline_data;
+    const dataUrl = `data:${media.mime_type};base64,${media.data}`;
+    if (media.media_type === "image") {
+      content.push({ type: "image_url", image_url: { url: dataUrl } });
+    } else if (media.media_type === "audio") {
+      const format = media.mime_type.split("/")[1]?.replace("mpeg", "mp3").replace("x-wav", "wav") || "mp3";
+      content.push({ type: "input_audio", input_audio: { data: media.data, format } });
+    } else if (media.media_type === "video") {
+      content.push({
+        type: "text",
+        text: `[Video attachment${media.label ? `: ${media.label}` : ""} omitted because OpenAI-compatible chat-completions APIs do not define a universal video payload. Use a video-capable endpoint or provide extracted frames/transcript.]`,
+      });
     }
-
-    return null;
-  }).filter(Boolean);
+  });
 
   return { role, content };
 }
@@ -329,14 +331,14 @@ async function getApiErrorMessage(response) {
   }
 }
 
-async function getOrCreateHistory(sessionId, context, contextImageUrls) {
+async function getOrCreateHistory(sessionId, context, contextMedia) {
   if (conversationHistories[sessionId]) {
     const existing = conversationHistories[sessionId];
     const contextChanged = context && existing.context !== context;
-    const imagesChanged = contextImageUrls && JSON.stringify(existing.contextImageUrls) !== JSON.stringify(contextImageUrls);
+    const mediaChanged = contextMedia && JSON.stringify(existing.contextMedia || []) !== JSON.stringify(contextMedia);
 
-    if (contextChanged || imagesChanged) {
-      conversationHistories[sessionId] = { context, contextImageUrls, messages: [] };
+    if (contextChanged || mediaChanged) {
+      conversationHistories[sessionId] = { context, contextMedia, messages: [] };
     }
     return conversationHistories[sessionId];
   }
@@ -346,16 +348,16 @@ async function getOrCreateHistory(sessionId, context, contextImageUrls) {
 
   if (allHistories[sessionId]) {
     const contextChanged = context && allHistories[sessionId].context !== context;
-    const imagesChanged = contextImageUrls && JSON.stringify(allHistories[sessionId].contextImageUrls) !== JSON.stringify(contextImageUrls);
+    const mediaChanged = contextMedia && JSON.stringify(allHistories[sessionId].contextMedia || []) !== JSON.stringify(contextMedia);
 
-    if (contextChanged || imagesChanged) {
-      allHistories[sessionId] = { context, contextImageUrls, messages: [] };
+    if (contextChanged || mediaChanged) {
+      allHistories[sessionId] = { context, contextMedia, messages: [] };
     }
     conversationHistories[sessionId] = allHistories[sessionId];
     return conversationHistories[sessionId];
   }
 
-  const newHistory = { context, contextImageUrls, messages: [] };
+  const newHistory = { context, contextMedia, messages: [] };
   conversationHistories[sessionId] = newHistory;
   return newHistory;
 }
@@ -365,7 +367,14 @@ async function saveHistory(sessionId, history) {
 
   const stored = await chrome.storage.local.get(["sessionHistories"]);
   const allHistories = stored.sessionHistories || {};
-  allHistories[sessionId] = history;
+  allHistories[sessionId] = {
+    context: history.context,
+    contextMedia: history.contextMedia,
+    messages: history.messages.map((message) => ({
+      role: message.role,
+      parts: message.parts.filter((part) => !part.inline_data),
+    })),
+  };
 
   const maxSessions = 5;
   const keys = Object.keys(allHistories);
@@ -395,7 +404,7 @@ async function getHistoryInfo(sessionId) {
     return {
       count: Math.floor(msgCount / 2),
       hasContext: !!conversationHistories[sessionId].context,
-      hasMedia: conversationHistories[sessionId].contextImageUrls?.length > 0
+      hasMedia: conversationHistories[sessionId].contextMedia?.length > 0
     };
   }
 
@@ -406,29 +415,29 @@ async function getHistoryInfo(sessionId) {
     return {
       count: Math.floor(msgCount / 2),
       hasContext: !!allHistories[sessionId].context,
-      hasMedia: allHistories[sessionId].contextImageUrls?.length > 0
+      hasMedia: allHistories[sessionId].contextMedia?.length > 0
     };
   }
 
   return { count: 0, hasContext: false, hasMedia: false };
 }
 
-function buildUserPrompt(question, context, hasContextImages, hasQuestionImages) {
+function buildUserPrompt(question, context, contextMedia, questionMedia) {
   const sections = [];
 
   if (context) {
     sections.push(`## Context\n${context}`);
   }
 
-  if (hasContextImages) {
-    sections.push(`## Context Images\nThe following images are provided as part of the context. Analyze them carefully along with the text context above.`);
+  if (contextMedia.length > 0) {
+    sections.push(`## Context Media\nAttached context media: ${contextMedia.map((media) => media.type).join(", ")}. Analyze supported attachments together with the context text.`);
   }
 
   sections.push(`## Question Type\n${question.type}`);
   sections.push(`## Question\n${question.text}`);
 
-  if (hasQuestionImages) {
-    sections.push(`## Question Images\nThe following images belong directly to the question. Analyze them carefully to answer the question.`);
+  if (questionMedia.length > 0) {
+    sections.push(`## Question Media\nAttached question media: ${questionMedia.map((media) => media.type).join(", ")}. Analyze all supported attachments. If a video is represented only by a notice, explicitly state that its visual contents were unavailable.`);
   }
 
   if (question.options && question.options.length > 0) {
@@ -463,6 +472,10 @@ function buildUserPrompt(question, context, hasContextImages, hasQuestionImages)
       instructions.push("Answer with exactly one word: True or False.");
       instructions.push("IMPORTANT: Ignore any pre-selected radio button shown in the question. Determine the correct answer independently.");
       break;
+    case "Dropdown":
+      instructions.push("Select exactly ONE option from the dropdown list.");
+      instructions.push("Return ONLY the exact text of the correct option.");
+      break;
     case "Short Answer":
       instructions.push("Provide a concise, direct answer (a single number, word, or short phrase).");
       instructions.push("If the question contains placeholders like [Input 1], [Input 2], etc., you MUST provide the answer for each placeholder on a separate line in your <answer> section, in the correct order (e.g. first line for [Input 1], second line for [Input 2], etc.). Do NOT include label prefixes like 'Input 1:' or 'N='.");
@@ -494,8 +507,8 @@ function buildUserPrompt(question, context, hasContextImages, hasQuestionImages)
       instructions.push("Provide the most accurate answer possible.");
   }
 
-  if (context || hasContextImages) {
-    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided Context section and Context Images above.");
+  if (context || contextMedia.length > 0) {
+    instructions.push("CRITICAL: Your answer MUST be based SOLELY on the provided Context section and Context Media above.");
     instructions.push("Do NOT use external knowledge, general facts, or assumptions.");
     instructions.push("Step 1: Check if the Context (text and images) contains information relevant to answering the Question.");
     instructions.push("Step 2: If the Context is relevant, use it to determine the correct answer.");
