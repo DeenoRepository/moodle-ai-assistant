@@ -32,16 +32,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function fetchMediaAsBase64(media) {
   try {
     if (media.url.startsWith("data:")) {
-      const match = media.url.match(/^data:([^;,]+)?(;base64)?,(.*)$/s);
+      const match = media.url.match(/^data:([^;,]+)?(;base64)?,/s);
       if (!match) throw new Error("Invalid data URL");
+      const response = await fetch(media.url);
+      const blob = await response.blob();
+      if (blob.size > MAX_MEDIA_BYTES) throw new Error(`File is larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`);
       const mimeType = match[1] || media.mimeType || "application/octet-stream";
-      const data = match[2] ? match[3] : btoa(decodeURIComponent(match[3]));
-      if (data.length * 0.75 > MAX_MEDIA_BYTES) throw new Error(`File is larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`);
       const detectedType = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video" : media.type;
-      return { type: detectedType, mimeType, data, label: media.label || "" };
+      if (!["image", "audio", "video"].includes(detectedType)) throw new Error(`Unsupported MIME type: ${mimeType}`);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return { type: detectedType, mimeType, data: btoa(binary), label: media.label || "" };
     }
 
-    const response = await fetch(media.url, { credentials: "include" });
+    const sameOrigin = new URL(media.url).origin === (media.pageOrigin || "");
+    const response = await fetch(media.url, { credentials: sameOrigin ? "include" : "omit" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const contentLength = Number(response.headers.get("content-length")) || 0;
     if (contentLength > MAX_MEDIA_BYTES) throw new Error(`File is larger than ${MAX_MEDIA_BYTES / 1024 / 1024} MB`);
@@ -74,14 +82,11 @@ async function loadMedia(mediaItems) {
 
 async function handleGetAnswer(question, questionMediaItems, context, contextMediaItems, sessionId) {
   const settings = await chrome.storage.sync.get([
-    "apiKey",
     "model",
-    "customApiKey",
-    "customModel",
     "endpoint",
   ]);
-  const apiKey = settings.customApiKey ?? settings.apiKey ?? "";
-  const selectedModel = settings.customModel || settings.model || "";
+  const apiKey = await getApiKey();
+  const selectedModel = settings.model || "";
   const endpoint = (settings.endpoint || "").trim();
 
   if (!endpoint) {
@@ -131,6 +136,17 @@ async function handleGetAnswer(question, questionMediaItems, context, contextMed
     // Do not retain a failed user request in the in-memory conversation.
     history.messages.pop();
     return { error: err.message };
+  }
+}
+
+const MAX_IN_MEMORY_SESSIONS = 5;
+
+function touchInMemoryHistory(sessionId, history) {
+  delete conversationHistories[sessionId];
+  conversationHistories[sessionId] = history;
+  const keys = Object.keys(conversationHistories);
+  for (let i = 0; i < keys.length - MAX_IN_MEMORY_SESSIONS; i++) {
+    delete conversationHistories[keys[i]];
   }
 }
 
@@ -223,7 +239,25 @@ function extractModelIds(data) {
     .sort((a, b) => a.localeCompare(b));
 }
 
-async function requestOpenAICompatible(endpoint, apiKey, model, messages) {
+async function getApiKey() {
+  const stored = await chrome.storage.local.get(["apiKey"]);
+  if (stored.apiKey) return stored.apiKey;
+
+  // Migrate a key saved by older versions in chrome.storage.sync.
+  const legacy = await chrome.storage.sync.get(["apiKey", "customApiKey"]);
+  const legacyKey = legacy.customApiKey || legacy.apiKey || "";
+  if (legacyKey) {
+    await chrome.storage.local.set({ apiKey: legacyKey });
+    await chrome.storage.sync.remove(["apiKey", "customApiKey"]);
+  }
+  return legacyKey;
+}
+
+function messagesContainAudio(messages) {
+  return messages.some((message) => message.parts.some((part) => part.inline_data?.media_type === "audio"));
+}
+
+async function requestOpenAICompatible(endpoint, apiKey, model, messages, options = {}) {
   const endpointUrl = deriveChatCompletionsEndpoint(parseApiUrl(endpoint));
 
   const headers = { "Content-Type": "application/json" };
@@ -236,18 +270,26 @@ async function requestOpenAICompatible(endpoint, apiKey, model, messages) {
     headers,
     body: JSON.stringify({
       model,
-      messages: messages.map(convertMessageToOpenAI),
+      messages: messages.map((message) => convertMessageToOpenAI(message, options)),
       temperature: 0.3,
-      max_tokens: 1024,
+      max_tokens: 2048,
       top_p: 0.95,
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`API error at ${endpointUrl.toString()}: ${await getApiErrorMessage(response)}`);
+    const errorMessage = await getApiErrorMessage(response);
+    // Some OpenAI-compatible endpoints reject input_audio with 400; retry once with audio as a text note.
+    if (response.status === 400 && !options.audioAsText && messagesContainAudio(messages)) {
+      return requestOpenAICompatible(endpoint, apiKey, model, messages, { audioAsText: true });
+    }
+    throw new Error(`API error at ${endpointUrl.toString()}: ${errorMessage}`);
   }
 
   const data = await response.json();
+  if (data.choices?.[0]?.finish_reason === "length") {
+    throw new Error("The model response was truncated (max_tokens reached). Increase the token limit or use a shorter prompt.");
+  }
   const rawContent = data.choices?.[0]?.message?.content
     ?? data.choices?.[0]?.text
     ?? data.answer
@@ -262,7 +304,7 @@ async function requestOpenAICompatible(endpoint, apiKey, model, messages) {
   return answer;
 }
 
-function convertMessageToOpenAI(message) {
+function convertMessageToOpenAI(message, options = {}) {
   const role = message.role === "model" ? "assistant" : message.role;
   const hasMedia = message.parts.some((part) => part.inline_data);
 
@@ -285,6 +327,8 @@ function convertMessageToOpenAI(message) {
     const dataUrl = `data:${media.mime_type};base64,${media.data}`;
     if (media.media_type === "image") {
       content.push({ type: "image_url", image_url: { url: dataUrl } });
+    } else if (media.media_type === "audio" && options.audioAsText) {
+      content.push({ type: "text", text: `[Audio attachment${media.label ? `: ${media.label}` : ""} omitted because this endpoint does not accept audio input.]` });
     } else if (media.media_type === "audio") {
       const format = media.mime_type.split("/")[1]?.replace("mpeg", "mp3").replace("x-wav", "wav") || "mp3";
       content.push({ type: "input_audio", input_audio: { data: media.data, format } });
@@ -353,17 +397,17 @@ async function getOrCreateHistory(sessionId, context, contextMedia) {
     if (contextChanged || mediaChanged) {
       allHistories[sessionId] = { context, contextMedia, messages: [] };
     }
-    conversationHistories[sessionId] = allHistories[sessionId];
-    return conversationHistories[sessionId];
+    touchInMemoryHistory(sessionId, allHistories[sessionId]);
+    return allHistories[sessionId];
   }
 
   const newHistory = { context, contextMedia, messages: [] };
-  conversationHistories[sessionId] = newHistory;
+  touchInMemoryHistory(sessionId, newHistory);
   return newHistory;
 }
 
 async function saveHistory(sessionId, history) {
-  conversationHistories[sessionId] = history;
+  touchInMemoryHistory(sessionId, history);
 
   const stored = await chrome.storage.local.get(["sessionHistories"]);
   const allHistories = stored.sessionHistories || {};
@@ -451,6 +495,23 @@ function buildUserPrompt(question, context, contextMedia, questionMedia) {
     sections.push(`## Available Matches\n${allMatches}`);
   }
 
+  if (question.type === "Embedded Cloze" && question.gapCount) {
+    const gapLines = (question.gapOptions || []).map((options, i) => options
+      ? `Gap ${i + 1}: choose one of: ${options.join(" | ")}`
+      : `Gap ${i + 1}: free-text blank, write the missing word(s)`);
+    sections.push(`## Gaps\nThere are ${question.gapCount} numbered gaps in the text, in order from 1 to ${question.gapCount}. Fill ALL of them, including free-text blanks:\n${gapLines.join("\n")}`);
+  }
+
+  if (question.type === "Drag into Text") {
+    const gapLines = (question.dropGroups || []).map((gap) => `[Gap ${gap.place}]: choose one of: ${gap.words.join(" | ")}`);
+    sections.push(`## Gaps\nThe text has numbered gaps. Each gap accepts ONLY the words listed for it:\n${gapLines.join("\n")}`);
+  }
+
+  if (question.type === "Drag and Drop (Image)") {
+    sections.push(`## Labels to Place\n${(question.dragItems || []).join("\n")}`);
+    sections.push(`## Numbered Places on the Image\nThe image shows numbered places: ${(question.dropPlaces || []).join(", ")}. Each label belongs to exactly one place.`);
+  }
+
   if (question.orderingItems && question.orderingItems.length > 0) {
     sections.push(`## Statements to Order (arrange these in correct order):\n${question.orderingItems.map((item, i) => `Statement ${i + 1}: ${item.text}`).join('\n')}`);
   }
@@ -481,8 +542,23 @@ function buildUserPrompt(question, context, contextMedia, questionMedia) {
       instructions.push("If the question contains placeholders like [Input 1], [Input 2], etc., you MUST provide the answer for each placeholder on a separate line in your <answer> section, in the correct order (e.g. first line for [Input 1], second line for [Input 2], etc.). Do NOT include label prefixes like 'Input 1:' or 'N='.");
       instructions.push("If the answer is a numerical value, return ONLY the number (e.g., '0.5' or '15'). Do NOT include the variable prefix (like 'R =') or unit suffix (like 'm', 'kg', 'м') unless the question does not specify them outside the input box.");
       instructions.push("For numerical values, do NOT round to an integer unless explicitly requested. Keep the fractional part and round to 1 or 2 decimal places (e.g. '214.86' or '214.9') to maintain accuracy for automated grading.");
-      instructions.push("IMPORTANT (Physics context): In Russian school/university physics thermodynamics tasks, the phrase 'кинетическая энергия теплового/хаотического движения всех молекул' (kinetic energy of chaotic motion of all molecules) refers to the translational kinetic energy formula: E = 1.5 * ν * R * T (using degrees of freedom i = 3, R = 8.31), even for diatomic gases like hydrogen (H2), nitrogen (N2), or oxygen (O2), unless the question explicitly specifies 'полная энергия' (full energy) or rotational motion.");
+      if (/кинетическая энергия|kinetic energy/i.test(question.text || "")) {
+        instructions.push("Note: if the question asks for kinetic energy of the thermal (chaotic) motion of molecules without specifying 'полная энергия' (full energy) or rotation, use the translational formula E = 1.5 * ν * R * T.");
+      }
       instructions.push("Do NOT add ending punctuation like periods to the answer.");
+      break;
+    case "Drag into Text":
+      instructions.push("Fill each numbered gap with one word from the list given for that gap. Each word is used at most once.");
+      instructions.push("Return exactly one line per gap in the format 'N: word', using the exact text from that gap's list. Do not repeat the sentence or the question text. Do not add any other text.");
+      break;
+    case "Drag and Drop (Image)":
+      instructions.push("Place each label on the numbered place it belongs to on the image.");
+      instructions.push("Return exactly one line per place in the format 'N: label', where N is the place number and label is the exact text from 'Labels to Place'. Use each label once. Do not add any other text.");
+      break;
+    case "Embedded Cloze":
+      instructions.push("Fill every numbered gap. For dropdown gaps choose one option from its list; for free-text gaps write the word or words that fit the sentence.");
+      instructions.push("Return exactly one line per gap in the format 'N: word', for example '1: am'. Use the exact text from the Word Options. Do not repeat the sentence or the question text. Do not add any other text.");
+      instructions.push("Choose the grammatically and semantically correct form for each gap, using the whole sentence context.");
       break;
     case "Essay":
       instructions.push("Provide a well-structured answer with clear reasoning.");
@@ -518,13 +594,9 @@ function buildUserPrompt(question, context, contextMedia, questionMedia) {
 
   sections.push(`## Instructions\n${instructions.join('\n')}`);
   sections.push(`## Answer Format
-CRITICAL: You MUST think step-by-step before answering to ensure mathematical and physics formulas are applied correctly (e.g. correct moment of inertia).
-You must format your response exactly like this:
-<reasoning>
-[Write your step-by-step derivation, formula selection, and calculation here. Show your thoughts.]
-</reasoning>
+Respond with the final answer only, wrapped exactly like this:
 <answer>
-[Write ONLY the final cleaned answer here, formatted exactly as requested in the instructions. No extra text, no explanation.]
+[Write ONLY the final answer here, formatted exactly as requested in the instructions. No extra text, no explanation.]
 </answer>`);
 
   return sections.join('\n\n');

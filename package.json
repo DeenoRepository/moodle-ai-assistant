@@ -1,0 +1,14 @@
+{
+  "name": "moodle-ai-assistant",
+  "version": "1.5.0",
+  "private": true,
+  "description": "Chrome extension that answers Moodle quiz questions via an OpenAI-compatible API",
+  "scripts": {
+    "test": "node tests/content-dom.test.js && node tests/service-worker.test.js",
+    "icons": "node icons/generate-icons.js"
+  },
+  "devDependencies": {
+    "canvas": "^3.1.0",
+    "jsdom": "^26.1.0"
+  }
+}

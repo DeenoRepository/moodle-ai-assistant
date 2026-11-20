@@ -10,17 +10,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   const status = document.getElementById("status");
 
   const settings = await chrome.storage.sync.get([
-    "apiKey",
     "model",
-    "customApiKey",
-    "customModel",
     "endpoint",
     "autofill",
   ]);
+  const secrets = await chrome.storage.local.get(["apiKey"]);
 
   endpointInput.value = settings.endpoint || "";
-  apiKeyInput.value = settings.customApiKey ?? settings.apiKey ?? "";
-  modelInput.value = settings.customModel || settings.model || "";
+  apiKeyInput.value = secrets.apiKey || "";
+  modelInput.value = settings.model || "";
   if (settings.autofill !== undefined) autofillCheckbox.checked = settings.autofill;
 
   function showStatus(message, type = "") {
@@ -120,15 +118,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    const endpointHost = new URL(endpoint).hostname;
+    const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(endpointHost);
+    if (new URL(endpoint).protocol === "http:" && !isLocal && apiKey
+      && !confirm("This endpoint uses plain HTTP, so the API key would be sent unencrypted. Save anyway?")) {
+      return;
+    }
+
     await chrome.storage.sync.set({
-      apiKey,
       model,
-      customApiKey: apiKey,
-      customModel: model,
       endpoint,
       autofill,
     });
-    await chrome.storage.sync.remove(["provider"]);
+    await chrome.storage.local.set({ apiKey });
+    await chrome.storage.sync.remove(["provider", "apiKey", "customApiKey", "customModel"]);
 
     showStatus("Settings saved successfully!", "success");
     setTimeout(() => showStatus(""), 3000);

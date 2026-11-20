@@ -3,6 +3,8 @@
   const LOADING_TEXT = "Loading...";
   const CONTEXT_BTN_TEXT = "Set Context";
   const CLEAR_CONTEXT_TEXT = "Clear Context";
+  const TEXT_INPUT_SELECTOR = 'input[type="text"], input[type="number"], input:not([type])';
+  const GAP_SELECTOR = `select, ${TEXT_INPUT_SELECTOR}`;
 
   let activeContextEl = null;
 
@@ -92,7 +94,8 @@
   function cleanOptionText(text) {
     return String(text || "")
       .replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, "")
-      .replace(/^[a-z0-9а-яё][\.\)\s-]+\s*/i, "")
+      // Strip only real option labels such as "a.", "a)", "1)", "2." and never a bare number that is the answer itself ("2 А/с").
+      .replace(/^(?:[a-zа-яё]|\d+)[\.\)]\s*|^[a-zа-яё]\s+-\s+/i, "")
       .replace(/[\s\xa0]+/g, " ")
       .trim();
   }
@@ -117,7 +120,9 @@
       const description = media.getAttribute("aria-label") || media.getAttribute("title") || "media attachment";
       media.replaceWith(clone.ownerDocument.createTextNode(` [${description}] `));
     });
-    clone.querySelectorAll("select, button, .moodle-ai-btn-wrapper, .moodle-ai-answer").forEach((el) => el.remove());
+    // Remove media player chrome (MediaElement/mejs settings, controls, time labels) and hidden labels.
+    // MathJax keeps its LaTeX source in <script type="math/tex">; it is not visible text and must not reach matching.
+    clone.querySelectorAll("script, style, select, button, .moodle-ai-btn-wrapper, .moodle-ai-answer, .accesshide, .visually-hidden, .sr-only, .mejs__container, .mejs-container, [class*='mejs'], [class*='mediaplugin'], [class*='mejs']").forEach((el) => el.remove());
     return (clone.innerText || clone.textContent || "").replace(/\s+/g, " ").trim();
   }
 
@@ -233,7 +238,7 @@
       const resolvedType = type || inferMediaType(url, mimeType);
       if (!resolvedType || seen.has(`${resolvedType}:${url}`)) return;
       seen.add(`${resolvedType}:${url}`);
-      media.push({ type: resolvedType, url, mimeType, label: cleanOptionText(label) });
+      media.push({ type: resolvedType, url, mimeType, label: cleanOptionText(label), pageOrigin: location.origin });
     };
 
     element.querySelectorAll("img").forEach((img) => {
@@ -321,32 +326,127 @@
     if (checkboxes.length > 0) return "Multiple Choice (Multiple)";
     if (radios.length > 0) return "Multiple Choice (Single)";
 
+    if (/multianswer/.test(classText) && selects.length + textInputs.length > 1) return "Embedded Cloze";
+
+    // Words dragged into sentence blanks (ddwtos) also use .draghome, so they are checked first.
+    if (/ddwtos/.test(classText) || formulation.querySelector(".drop.place1, .drop[class*='place'], .answercontainer")) {
+      return "Drag into Text";
+    }
+
+    if (formulation.querySelector(".ddarea, .draghome, input.placeinput") || /ddimageortext|ddmarker/.test(classText)) {
+      return "Drag and Drop (Image)";
+    }
+
     if (selects.length > 1) {
       const allNumeric = selects.every((select) => [...select.options].filter((option) => option.value).some((option) => /^\d+$/.test(option.text.trim())));
       const orderingClass = /(ordering|order|sequence|sort|rank)/.test(classText);
+      if (/multianswer/.test(classText)) return "Embedded Cloze";
       if (allNumeric || orderingClass) return "Ordering";
+      // Gaps inside running text: each inline select has its own word list (not item->match pairs).
+      const isInlineGap = selects.every((select) => select.closest(".subquestion"));
+      const wordOptions = selects.every((select) => {
+        const values = [...select.options].filter((option) => option.value);
+        return values.length >= 2 && values.every((option) => option.text.trim().length > 0);
+      });
+      if (isInlineGap && wordOptions) return "Embedded Cloze";
+      // Matching puts each dropdown in its own row. Several dropdowns sharing one row container are gaps in running text.
+      const rowContainers = new Set(selects.map((select) => select.closest("tr, div, li")));
+      if (rowContainers.size < selects.length) return "Embedded Cloze";
       return "Matching";
     }
 
-    if (selects.length === 1) return "Dropdown";
+    if (selects.length === 1) return /multianswer/.test(classText) ? "Embedded Cloze" : "Dropdown";
     if (hasTextarea) return "Essay";
     if (textInputs.length > 0) return "Short Answer";
     return "Unknown";
+  }
+
+  // Content scripts run in an isolated world, so Moodle's listeners (on the page's own world) must be
+  // triggered from injected page code. The payload is passed as JSON in a data attribute.
+  function setInputValueNative(input, value) {
+    input.setAttribute("value", value);
+    const proto = Object.getPrototypeOf(input);
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+    if (setter) setter.call(input, value);
+    else input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function fireMouse(target, type, x, y) {
+    target.dispatchEvent(new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      button: 0,
+      buttons: type === "mouseup" ? 0 : 1,
+    }));
+  }
+
+  // Performs the same mouse sequence as a user dragging a label onto a numbered place.
+  // Returns true only if Moodle reports the label as placed in that place.
+  async function simulateDragToDrop(dragEl, dropEl) {
+    const from = dragEl.getBoundingClientRect();
+    const to = dropEl.getBoundingClientRect();
+    if (to.width === 0 || to.height === 0) return false;
+
+    const startX = from.left + from.width / 2;
+    const startY = from.top + from.height / 2;
+    const endX = to.left + to.width / 2;
+    const endY = to.top + to.height / 2;
+
+    fireMouse(dragEl, "mousedown", startX, startY);
+    const steps = 8;
+    for (let i = 1; i <= steps; i++) {
+      const x = startX + ((endX - startX) * i) / steps;
+      const y = startY + ((endY - startY) * i) / steps;
+      fireMouse(document, "mousemove", x, y);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    // A real mouseup is delivered to the element under the pointer, which is the target drop zone.
+    fireMouse(dropEl, "mouseup", endX, endY);
+
+    // Moodle animates the drag into place; wait for the class change before checking.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const placeClass = `inplace${dropEl.className.match(/place(\d+)/)?.[1]}`;
+    return dragEl.classList.contains("placed") && dragEl.classList.contains(placeClass);
+  }
+
+  function getClozeGaps(formulation) {
+    // Dropdowns and text blanks in document order, so gap numbers match what the model sees.
+    return [...formulation.querySelectorAll(GAP_SELECTOR)];
   }
 
   function extractQuestionData(formulation) {
     const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
     const textSource = questionTextEl || formulation;
     const clone = textSource.cloneNode(true);
-    clone.querySelectorAll('input[type="text"], input[type="number"], input:not([type])').forEach((input, index) => {
-      input.replaceWith(clone.ownerDocument.createTextNode(`[Input ${index + 1}]`));
-    });
+    // Text blanks inside running text ("(1) ___") are gaps, not separate inputs.
+    const isCloze = detectQuestionType(formulation) === "Embedded Cloze"
+      || (formulation.querySelectorAll(TEXT_INPUT_SELECTOR).length > 1 && /\(\d+\)\s*_+/.test(textSource.textContent || ""));
+    if (detectQuestionType(formulation) === "Drag into Text") {
+      // Word-bank blanks are <span class="drop placeN">; number them so the answer can name them.
+      clone.querySelectorAll(".drop").forEach((drop) => {
+        const place = (drop.className.match(/place(\d+)/) || [])[1];
+        drop.replaceWith(clone.ownerDocument.createTextNode(` [Gap ${place || "?"}] `));
+      });
+    } else if (isCloze) {
+      clone.querySelectorAll(".accesshide").forEach((el) => el.remove());
+      clone.querySelectorAll(GAP_SELECTOR).forEach((control, index) => {
+        control.replaceWith(clone.ownerDocument.createTextNode(` [Gap ${index + 1}] `));
+      });
+    } else {
+      clone.querySelectorAll(TEXT_INPUT_SELECTOR).forEach((input, index) => {
+        input.replaceWith(clone.ownerDocument.createTextNode(`[Input ${index + 1}]`));
+      });
+    }
     let questionText = getAccessibleText(clone);
     const media = extractMediaFromElement(formulation);
 
     questionText = questionText
       .replace(/\s+/g, ' ')
-      .replace(/AI Answer|Set Context|Clear Context/gi, '')
       .replace(/\(Вы ответили\)|\(Answer saved\)|\(Saved\)/gi, '')
       .trim();
 
@@ -382,6 +482,35 @@
       data.options = [...select.options].filter((option) => option.value).map((option) => cleanOptionText(option.text));
     }
 
+    if (type === "Drag into Text") {
+      // Moodle splits words into groups: a gap accepts only the words of its own group (group1, group2, ...).
+      const wordsByGroup = new Map();
+      formulation.querySelectorAll(".draghome:not(.dragplaceholder)").forEach((el) => {
+        const group = (el.className.match(/group(\d+)/) || [])[1];
+        const text = cleanOptionText(el.textContent);
+        if (!group || !text) return;
+        if (!wordsByGroup.has(group)) wordsByGroup.set(group, []);
+        const words = wordsByGroup.get(group);
+        if (!words.includes(text)) words.push(text);
+      });
+      const drops = [...formulation.querySelectorAll(".drop")];
+      data.dropGroups = drops.map((drop) => {
+        const place = Number((drop.className.match(/place(\d+)/) || [])[1]);
+        const group = (drop.className.match(/group(\d+)/) || [])[1];
+        return { place, group, words: wordsByGroup.get(group) || [] };
+      }).filter((gap) => gap.place);
+      data.dropPlaces = data.dropGroups.map((gap) => gap.place);
+      data.dragItems = [...new Set([...wordsByGroup.values()].flat())];
+    }
+
+    if (type === "Drag and Drop (Image)") {
+      data.dragItems = [...formulation.querySelectorAll(".draghome")].map((el) => cleanOptionText(el.textContent)).filter(Boolean);
+      data.dropPlaces = [...formulation.querySelectorAll("input.placeinput")].map((input) => {
+        const place = (input.className.match(/place(\d+)/) || [])[1];
+        return place ? Number(place) : null;
+      }).filter(Boolean).sort((a, b) => a - b);
+    }
+
     if (type === "Matching") {
       const selects = formulation.querySelectorAll("select");
       const pairs = [];
@@ -399,6 +528,15 @@
         }
       });
       data.matchingPairs = pairs;
+    }
+
+    if (type === "Embedded Cloze") {
+      const gaps = getClozeGaps(formulation);
+      data.gapCount = gaps.length;
+      // null marks a free-text gap; an array lists the dropdown options.
+      data.gapOptions = gaps.map((control) => control.tagName === "SELECT"
+        ? [...control.options].filter((option) => option.value).map((option) => cleanOptionText(option.text))
+        : null);
     }
 
     if (type === "Ordering") {
@@ -419,6 +557,21 @@
     }
 
     return data;
+  }
+
+  // Returns the option whose text appears as whole words in the sentence (the longest such option wins), or null.
+  function findOptionInSentence(options, sentence) {
+    const paddedSentence = ` ${cleanTextForMatching(sentence)} `;
+    let best = null;
+    let bestLength = 0;
+    options.forEach((option) => {
+      const normalized = cleanTextForMatching(option.text);
+      if (normalized && paddedSentence.includes(` ${normalized} `) && normalized.length > bestLength) {
+        best = option;
+        bestLength = normalized.length;
+      }
+    });
+    return best;
   }
 
   function calculateSimilarity(str1, str2) {
@@ -443,7 +596,7 @@
     return scored[0].item;
   }
 
-  function autoFillAnswer(formulation, answer, questionType) {
+  async function autoFillAnswer(formulation, answer, questionType) {
     const normalizedAnswer = cleanTextForMatching(answer);
 
     if (questionType === "True/False") {
@@ -478,6 +631,59 @@
       return;
     }
 
+    if (questionType === "Embedded Cloze") {
+      const gaps = getClozeGaps(formulation);
+      const values = new Map();
+      const answerLines = answer.split(/\n/).map((line) => line.trim()).filter(Boolean);
+      answerLines.forEach((line) => {
+        // Accepts "1: word" and "... Blank 1 ...: word", which the model sometimes echoes from the question.
+        const numbered = line.match(/^(\d+)\s*[:.)-]\s*(.+)$/);
+        const labelled = line.match(/\b(?:blank|gap)\s*(\d+)\b[^:]*:\s*(.+)$/i);
+        const match = numbered || labelled;
+        if (match) values.set(Number(match[1]), match[2].trim());
+      });
+      // Fallback: the model echoed each sentence with the gap filled, e.g. "The motor produces torque" is
+      // "...: torque". Without numbers, the n-th line with a colon fills the n-th gap.
+      if (values.size === 0) {
+        let gapNumber = 0;
+        answerLines.forEach((line) => {
+          const colon = line.lastIndexOf(":");
+          if (colon <= 0) return;
+          gapNumber += 1;
+          values.set(gapNumber, line.slice(colon + 1).trim());
+        });
+      }
+      const usedLines = new Set();
+      gaps.forEach((control, index) => {
+        let word = values.get(index + 1);
+        if (!word && control.tagName === "SELECT") {
+          // The model wrote full sentences instead of "N: word". Line N belongs to gap N when the counts match;
+          // otherwise use the first unused line that names one of this gap's options.
+          const options = [...control.options].filter((option) => option.value);
+          const candidateLines = answerLines.length === gaps.length
+            ? [index]
+            : answerLines.map((_, i) => i).filter((i) => !usedLines.has(i));
+          for (const i of candidateLines) {
+            const option = findOptionInSentence(options, answerLines[i]);
+            if (option) {
+              word = option.text;
+              usedLines.add(i);
+              break;
+            }
+          }
+        }
+        if (!word) return;
+        if (control.tagName === "SELECT") {
+          const options = [...control.options].filter((option) => option.value);
+          const target = findBestTextMatch(options, word, (option) => option.text);
+          if (target) setControlValue(control, target.value);
+        } else {
+          setControlValue(control, word);
+        }
+      });
+      return;
+    }
+
     if (questionType === "Dropdown") {
       const select = formulation.querySelector("select");
       const options = [...select.options].filter((option) => option.value);
@@ -495,22 +701,74 @@
       }
       if (textarea) setControlValue(textarea, answer.trim());
       if (!textarea && !contentEditable) {
-        const textInputs = formulation.querySelectorAll('input[type="text"], input[type="number"], input:not([type])');
+        const textInputs = [...formulation.querySelectorAll('input[type="text"], input[type="number"], input:not([type])')];
         const answerLines = answer.split("\n").map((line) => line.trim()).filter(Boolean);
-        textInputs.forEach((input, index) => {
-          if (index < answerLines.length) setControlValue(input, answerLines[index]);
-        });
+
+        // One shared passage with several numbered blanks is split into one question per blank.
+        // Each question's own blank number is its position among the blank questions on the page.
+        const blankQuestions = [...document.querySelectorAll(".que.shortanswer")];
+        const questionIndex = blankQuestions.indexOf(formulation.closest(".que"));
+        const blankNumber = questionIndex >= 0 ? String(questionIndex + 1) : null;
+        const numberedLine = blankNumber
+          ? answerLines.find((line) => new RegExp(`^${blankNumber}\\s*[:.)-]\\s*`).test(line))
+          : null;
+
+        if (textInputs.length === 1 && numberedLine) {
+          setControlValue(textInputs[0], numberedLine.replace(/^\d+\s*[:.)-]\s*/, "").trim());
+        } else {
+          textInputs.forEach((input, index) => {
+            if (index < answerLines.length) setControlValue(input, answerLines[index]);
+          });
+        }
       }
+      return;
+    }
+
+    if (questionType === "Drag and Drop (Image)") {
+      // Answers are lines "N: label" where N is the number printed on the image.
+      // Moodle only reads the hidden inputs on page load, so each label is dragged onto its place.
+      const pairs = answer.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+        const match = line.match(/^(\d+)\s*[:.)-]\s*(.+)$/);
+        return match ? { place: Number(match[1]), label: match[2].trim() } : null;
+      }).filter(Boolean);
+
+      // EXPERIMENTAL: Moodle reads "placeinput" values on page load, and a window resize did NOT
+      // re-place drags in a live test. Drags may stay in their home positions after this runs.
+      console.warn("[Moodle AI] Drag and Drop placement is experimental and may not show on the image.");
+      const homes = [...formulation.querySelectorAll(".draghome:not(.dragplaceholder)")];
+      const choiceByLabel = new Map();
+      homes.forEach((el) => {
+        const choice = (el.className.match(/choice(\d+)/) || [])[1];
+        if (choice) choiceByLabel.set(el.textContent.trim(), choice);
+      });
+
+      for (const { place, label } of pairs) {
+        const exact = [...choiceByLabel.keys()].find((text) => cleanTextForMatching(text) === cleanTextForMatching(label));
+        const best = exact || [...choiceByLabel.keys()]
+          .map((text) => ({ text, score: calculateSimilarity(text, label) }))
+          .sort((a, b) => b.score - a.score)[0];
+        const choice = exact ? choiceByLabel.get(exact) : (best && best.score >= 0.72 ? choiceByLabel.get(best.text) : null);
+        const input = formulation.querySelector(`input.placeinput.place${place}`);
+        if (!choice || !input) {
+          console.warn(`[Moodle AI] No match for "${label}" on place ${place}`);
+          continue;
+        }
+        setInputValueNative(input, choice);
+      }
+
+      // Moodle re-positions every drag from the inputs on window resize.
+      window.dispatchEvent(new Event("resize"));
       return;
     }
 
     if (questionType === "Matching") {
       const answerPairs = answer.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-        const separator = line.match(/\s(?:->|=>|:|—|-)+\s/);
-        if (!separator) return null;
-        const index = separator.index;
-        return { item: line.slice(0, index).trim(), match: line.slice(index + separator[0].length).trim() };
-      }).filter(Boolean);
+        // Separators are tried in order of specificity. A colon or arrow may have no spaces around it
+        // ("Sedan: седан"), while a plain hyphen must have spaces so "four-wheel drive" is not split.
+        const separator = line.match(/\s*(?:->|=>|—)\s*/) || line.match(/\s*:\s*/) || line.match(/\s+-\s+/);
+        if (!separator || separator.index === 0) return null;
+        return { item: line.slice(0, separator.index).trim(), match: line.slice(separator.index + separator[0].length).trim() };
+      }).filter((pair) => pair && pair.item && pair.match);
 
       formulation.querySelectorAll("select").forEach((select) => {
         const row = select.closest("tr, div, li");
@@ -628,10 +886,17 @@
     if (isCurrentlyActive) {
       await clearContext();
     } else {
-      const questionTextEl = formulation.querySelector(".qtext, .questiontext, [class*='question-text']");
-      const contextText = questionTextEl ? questionTextEl.innerText.trim() : formulation.innerText.trim();
+      // A shared passage (dialogue, listening script) is usually in an earlier "description" block,
+      // so pin that block's full text instead of only this question's own short text.
+      const sharedBlock = findSharedDescription(formulation);
+      const source = sharedBlock || formulation;
+      const questionTextEl = source.querySelector(".qtext, .questiontext, [class*='question-text']");
+      const contextText = questionTextEl ? questionTextEl.innerText.trim() : source.innerText.trim();
 
-      const media = extractMediaFromElement(formulation);
+      const media = [...extractMediaFromElement(source)];
+      if (sharedBlock) {
+        media.push(...extractMediaFromElement(formulation).filter((m) => !media.some((x) => x.url === m.url)));
+      }
 
       await setContext(contextText, formulation, media);
     }
@@ -643,11 +908,55 @@
 
     if (!formulation) return;
 
+    await answerFormulation(formulation, btn);
+  }
+
+  // Returns the nearest preceding "description" block of the same quiz form, or null.
+  function findSharedDescription(formulation) {
+    const que = formulation.closest(".que");
+    if (!que) return null;
+    let previous = que.previousElementSibling;
+    while (previous) {
+      if (previous.classList.contains("description")) {
+        const descriptionBody = previous.querySelector(".formulation, .content") || previous;
+        return descriptionBody;
+      }
+      previous = previous.previousElementSibling;
+    }
+    return null;
+  }
+
+  function findSharedAudio(formulation) {
+    const que = formulation.closest(".que");
+    if (!que) return null;
+    let previous = que.previousElementSibling;
+    while (previous) {
+      if (previous.classList.contains("que")) {
+        const audio = extractMediaFromElement(previous).filter((m) => m.type === "audio");
+        if (audio.length > 0) return audio;
+      }
+      previous = previous.previousElementSibling;
+    }
+    return null;
+  }
+
+  async function answerFormulation(formulation, btn, options = {}) {
     btn.textContent = LOADING_TEXT;
     btn.disabled = true;
 
     const questionData = extractQuestionData(formulation);
-    const contextData = await loadContext();
+    // Pinned context (set with "Set Context") goes with every question on the page.
+    // Otherwise each question uses only its own text and media.
+    const pinned = await loadContext();
+    const contextData = pinned.text
+      ? pinned
+      : { text: null, media: [] };
+    // A shared audio clip often sits in an earlier "description" block of the same quiz form,
+    // so questions without their own audio inherit it from the nearest preceding block that has one.
+    if (!questionData.media.some((m) => m.type === "audio")) {
+      const sharedAudio = findSharedAudio(formulation);
+      if (sharedAudio) questionData.media.push(...sharedAudio);
+    }
     const sessionId = getSessionId();
 
     let answerDiv = formulation.querySelector(".moodle-ai-answer");
@@ -677,7 +986,7 @@
         answerDiv.textContent = response.error;
       } else {
         const contextStatus = contextData.text
-          ? `<span class="moodle-ai-context-status" title="${contextData.text.substring(0, 200)}"> Context active</span>`
+          ? `<span class="moodle-ai-context-status" title="${escapeHtml(contextData.text.substring(0, 200)).replace(/"/g, "&quot;")}"> Context active</span>`
           : `<span class="moodle-ai-context-status moodle-ai-context-status-none">No context</span>`;
 
         const mediaCounts = response.loadedQuestionMediaCounts || {};
@@ -718,8 +1027,8 @@
         }
 
         const { autofill } = await chrome.storage.sync.get(["autofill"]);
-        if (autofill !== false) {
-          autoFillAnswer(formulation, parsed.answer, questionData.type);
+        if (questionData.type !== "Drag and Drop (Image)" && (options.forceAutofill || autofill !== false)) {
+          await autoFillAnswer(formulation, parsed.answer, questionData.type);
         }
 
         updateHistoryBadge(response.historyCount);
@@ -736,6 +1045,7 @@
 
     btn.textContent = BUTTON_TEXT;
     btn.disabled = false;
+    return answerDiv.classList.contains("moodle-ai-answer-success");
   }
 
   function createHistoryBadge(count) {
@@ -935,6 +1245,132 @@
     });
   }
 
+  const AUTO_RUN_KEY = "autoRun";
+  const AUTO_MAX_PAGES = 100;
+  const AUTO_START_DELAY_MS = 1500;
+  let autoRunning = false;
+  let autoPanel = null;
+
+  async function getAutoRunState() {
+    if (!isExtensionValid()) return { active: false };
+    const stored = await chrome.storage.local.get([AUTO_RUN_KEY]);
+    return stored[AUTO_RUN_KEY] || { active: false };
+  }
+
+  async function patchAutoRun(patch) {
+    const next = { ...(await getAutoRunState()), ...patch };
+    await chrome.storage.local.set({ [AUTO_RUN_KEY]: next });
+    renderAutoPanel(next);
+    return next;
+  }
+
+  function getAnswerButton(formulation) {
+    return formulation.querySelector(".moodle-ai-btn:not(.moodle-ai-context-btn)");
+  }
+
+  function findNextPageButton() {
+    // Moodle reuses name="next" for both "Next page" and "Finish attempt", so check the label.
+    return [...document.querySelectorAll("input[name='next'], button[name='next']")]
+      .find((el) => {
+        if (el.disabled) return false;
+        const label = (el.value || el.textContent || "").trim();
+        if (/finish|submit|закончить|завершить|отправ/i.test(label)) return false;
+        return /next|следующ/i.test(label);
+      }) || null;
+  }
+
+  function renderAutoPanel(state = {}) {
+    if (!autoPanel) return;
+    const toggle = autoPanel.querySelector(".moodle-ai-auto-toggle");
+    const status = autoPanel.querySelector(".moodle-ai-auto-status");
+    toggle.textContent = state.active ? "Stop auto-answer" : "Auto-answer all pages";
+    toggle.classList.toggle("moodle-ai-auto-toggle-active", !!state.active);
+    status.textContent = state.message || "";
+  }
+
+  function initAutoPanel() {
+    autoPanel = document.createElement("div");
+    autoPanel.className = "moodle-ai-auto-panel";
+    autoPanel.innerHTML = `
+      <button type="button" class="moodle-ai-auto-toggle"></button>
+      <div class="moodle-ai-auto-status"></div>
+    `;
+    autoPanel.querySelector(".moodle-ai-auto-toggle").addEventListener("click", onAutoToggle);
+    document.body.appendChild(autoPanel);
+    getAutoRunState().then(renderAutoPanel).catch(() => {});
+  }
+
+  async function onAutoToggle() {
+    const state = await getAutoRunState();
+    if (state.active) {
+      await patchAutoRun({ active: false, message: "Stopped by user." });
+      return;
+    }
+    await patchAutoRun({ active: true, pagesDone: 0, message: "Starting..." });
+    runAutoPage();
+  }
+
+  async function resumeAutoRun() {
+    const state = await getAutoRunState();
+    if (!state.active) return;
+    await new Promise((resolve) => setTimeout(resolve, AUTO_START_DELAY_MS));
+    runAutoPage();
+  }
+
+  async function runAutoPage() {
+    if (autoRunning) return;
+    autoRunning = true;
+    try {
+      const formulations = [...document.querySelectorAll(".formulation")];
+      if (formulations.length === 0) {
+        await patchAutoRun({ active: false, message: "No questions on this page. Stopped." });
+        return;
+      }
+
+      for (let i = 0; i < formulations.length; i++) {
+        if (!(await getAutoRunState()).active) return;
+
+        const formulation = formulations[i];
+        const btn = getAnswerButton(formulation);
+        if (!btn || formulation.querySelector(".moodle-ai-answer-success")) continue;
+
+        await patchAutoRun({ message: `Answering question ${i + 1} of ${formulations.length}...` });
+        const ok = await answerFormulation(formulation, btn, { forceAutofill: true });
+        if (!ok) {
+          await patchAutoRun({ active: false, message: `Stopped: question ${i + 1} could not be answered.` });
+          return;
+        }
+      }
+
+      if (!(await getAutoRunState()).active) return;
+
+      const nextBtn = findNextPageButton();
+      if (!nextBtn) {
+        await patchAutoRun({
+          active: false,
+          message: "Last question reached. Review the answers and submit the attempt yourself.",
+        });
+        return;
+      }
+
+      const pagesDone = ((await getAutoRunState()).pagesDone || 0) + 1;
+      if (pagesDone >= AUTO_MAX_PAGES) {
+        await patchAutoRun({ active: false, pagesDone, message: `Stopped: page limit (${AUTO_MAX_PAGES}) reached.` });
+        return;
+      }
+
+      await patchAutoRun({ pagesDone, message: `Page ${pagesDone} answered. Opening the next page...` });
+      nextBtn.click();
+    } catch (err) {
+      if (err.message !== "Extension context invalidated") {
+        console.warn("Auto-answer stopped:", err);
+      }
+      await patchAutoRun({ active: false, message: `Stopped: ${err.message}` }).catch(() => {});
+    } finally {
+      autoRunning = false;
+    }
+  }
+
   function escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = text;
@@ -944,7 +1380,11 @@
   const observer = new MutationObserver((mutations) => {
     let shouldInject = false;
     for (const mutation of mutations) {
-      if (mutation.addedNodes.length > 0) {
+      const external = [...mutation.addedNodes].some((node) => {
+        if (node.nodeType !== Node.ELEMENT_NODE) return false;
+        return !node.matches?.(".moodle-ai-btn-wrapper, .moodle-ai-answer, .moodle-ai-history-badge, .moodle-ai-log-modal, .moodle-ai-auto-panel");
+      });
+      if (external) {
         shouldInject = true;
         break;
       }
@@ -960,4 +1400,6 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   injectButtons();
+  initAutoPanel();
+  resumeAutoRun().catch(() => {});
 })();
