@@ -926,14 +926,16 @@
     return null;
   }
 
-  function findSharedAudio(formulation) {
+  // Shared listening/video material sits in an earlier "description" block of the same quiz form.
+  // Both audio and video must reach the model, so any playable media counts as shared.
+  function findSharedMedia(formulation) {
     const que = formulation.closest(".que");
     if (!que) return null;
     let previous = que.previousElementSibling;
     while (previous) {
       if (previous.classList.contains("que")) {
-        const audio = extractMediaFromElement(previous).filter((m) => m.type === "audio");
-        if (audio.length > 0) return audio;
+        const shared = extractMediaFromElement(previous).filter((m) => m.type === "audio" || m.type === "video");
+        if (shared.length > 0) return shared;
       }
       previous = previous.previousElementSibling;
     }
@@ -951,11 +953,11 @@
     const contextData = pinned.text
       ? pinned
       : { text: null, media: [] };
-    // A shared audio clip often sits in an earlier "description" block of the same quiz form,
-    // so questions without their own audio inherit it from the nearest preceding block that has one.
-    if (!questionData.media.some((m) => m.type === "audio")) {
-      const sharedAudio = findSharedAudio(formulation);
-      if (sharedAudio) questionData.media.push(...sharedAudio);
+    // Shared audio or video often sits in an earlier "description" block of the same quiz form,
+    // so questions without their own playable media inherit it from the nearest preceding block that has one.
+    if (!questionData.media.some((m) => m.type === "audio" || m.type === "video")) {
+      const sharedMedia = findSharedMedia(formulation);
+      if (sharedMedia) questionData.media.push(...sharedMedia);
     }
     const sessionId = getSessionId();
 

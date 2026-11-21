@@ -1,5 +1,7 @@
 const conversationHistories = {};
 const MAX_MEDIA_BYTES = 8 * 1024 * 1024;
+// Videos are only decoded for their audio track, so they may be larger than other media.
+const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
 const MAX_MEDIA_ITEMS_PER_REQUEST = 8;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -74,10 +76,42 @@ async function fetchMediaAsBase64(media) {
 async function loadMedia(mediaItems) {
   const loaded = [];
   for (const media of mediaItems.slice(0, MAX_MEDIA_ITEMS_PER_REQUEST)) {
-    const data = await fetchMediaAsBase64(media);
+    const data = media.type === "video" ? await extractVideoAudio(media) : await fetchMediaAsBase64(media);
     if (data) loaded.push(data);
   }
   return loaded;
+}
+
+// Video is sent to the model as its audio track only (WAV). Frames are never sent.
+async function extractVideoAudio(media) {
+  try {
+    const response = await fetch(media.url, { credentials: new URL(media.url).origin === (media.pageOrigin || "") ? "include" : "omit" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const blob = await response.blob();
+    if (blob.size > MAX_VIDEO_BYTES) throw new Error(`Video is larger than ${MAX_VIDEO_BYTES / 1024 / 1024} MB`);
+    const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
+    const result = await runOffscreenAudioExtraction(bytes);
+    if (!result.ok) throw new Error(result.error);
+    return { type: "audio", mimeType: "audio/wav", data: result.data, label: media.label || "", fromVideo: true };
+  } catch (error) {
+    // Keep the reason, so the failure is visible in the answer log instead of looking like a missing attachment.
+    console.error(`Failed to extract audio from video ${media.url}:`, error);
+    return { type: "video", failed: true, reason: error.message, label: media.label || "" };
+  }
+}
+
+async function ensureOffscreenDocument() {
+  if (await chrome.offscreen.hasDocument()) return;
+  await chrome.offscreen.createDocument({
+    url: "background/offscreen.html",
+    reasons: ["AUDIO_PLAYBACK"],
+    justification: "Decode the audio track of a quiz video so it can be sent to the model.",
+  });
+}
+
+async function runOffscreenAudioExtraction(bytes) {
+  await ensureOffscreenDocument();
+  return chrome.runtime.sendMessage({ target: "offscreen", action: "extractAudio", bytes });
 }
 
 async function handleGetAnswer(question, questionMediaItems, context, contextMediaItems, sessionId) {
@@ -333,9 +367,10 @@ function convertMessageToOpenAI(message, options = {}) {
       const format = media.mime_type.split("/")[1]?.replace("mpeg", "mp3").replace("x-wav", "wav") || "mp3";
       content.push({ type: "input_audio", input_audio: { data: media.data, format } });
     } else if (media.media_type === "video") {
+      // Only reached when the audio track could not be extracted (see extractVideoAudio).
       content.push({
         type: "text",
-        text: `[Video attachment${media.label ? `: ${media.label}` : ""} omitted because OpenAI-compatible chat-completions APIs do not define a universal video payload. Use a video-capable endpoint or provide extracted frames/transcript.]`,
+        text: `[Video${media.label ? `: ${media.label}` : ""}: its audio track could not be extracted${media.reason ? ` (${media.reason})` : ""}. Answer from the question text only.]`,
       });
     }
   });

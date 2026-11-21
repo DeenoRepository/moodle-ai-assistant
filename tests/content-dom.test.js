@@ -3,7 +3,7 @@ const { JSDOM } = require("jsdom");
 
 const contentScript = fs.readFileSync("./content/content.js", "utf8").replace(
   "  const observer = new MutationObserver((mutations) => {",
-  "  window.__moodleAiTest = { detectQuestionType, extractQuestionData, autoFillAnswer, extractMediaFromElement, findNextPageButton, findSharedAudio, findSharedDescription };\n\n  const observer = new MutationObserver((mutations) => {"
+  "  window.__moodleAiTest = { detectQuestionType, extractQuestionData, autoFillAnswer, extractMediaFromElement, findNextPageButton, findSharedMedia, findSharedDescription };\n\n  const observer = new MutationObserver((mutations) => {"
 );
 
 function createDom(html) {
@@ -232,7 +232,7 @@ test("question without its own audio inherits audio from the preceding descripti
   const formulation = dom.window.document.querySelectorAll(".formulation")[1];
   const own = api.extractQuestionData(formulation).media.filter((m) => m.type === "audio");
   assertEqual(own.length, 0, "question has no audio of its own");
-  const shared = api.findSharedAudio(formulation);
+  const shared = api.findSharedMedia(formulation);
   assertEqual(!!shared && shared.length === 1 && shared[0].type === "audio", true, "audio found in the description block");
 });
 
@@ -366,6 +366,14 @@ test("Matching answers written as 'Item: match' without spaces around the colon 
   api.autoFillAnswer(formulation, pairs.map(([item, match]) => `${item}: ${match}`).join("\n"), "Matching");
   const chosen = [...formulation.querySelectorAll("select")].map((select) => select.options[select.selectedIndex].text);
   assertEqual(chosen.join("|"), pairs.map(([, match]) => match).join("|"), "every dropdown gets its match");
+});
+
+test("video in an earlier description block is shared with following multichoice questions", () => {
+  const dom = createDom(`<div class="que description"><div class="formulation clearfix"><div class="qtext"><p>Watch the video.</p><video><source src="/pluginfile.php/clip.mp4" type="video/mp4" /></video></div></div></div><div class="que multichoice"><div class="formulation clearfix"><div class="qtext">Which statement is true?</div><div class="answer"><div class="r0"><input type="radio" name="q" id="a" /><label for="a">A</label></div><div class="r1"><input type="radio" name="q" id="b" /><label for="b">B</label></div></div></div></div>`);
+  const api = dom.window.__moodleAiTest;
+  const formulation = dom.window.document.querySelector(".que.multichoice .formulation");
+  const shared = api.findSharedMedia(formulation);
+  assertEqual(!!shared && shared.some((m) => m.type === "video"), true, "video from the description is inherited");
 });
 
 test("auto-answer never clicks a Finish attempt button even though it is named next", () => {
