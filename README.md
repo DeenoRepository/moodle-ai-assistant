@@ -21,6 +21,14 @@ On a quiz attempt page, click **Auto-answer all pages** in the bottom-right pane
 
 The extension only runs on URLs containing `mod/quiz/`.
 
+## Editing context and adding transcripts
+
+Audio/video attachments have a **Download audio / video** panel with **Save to PC** (Chrome's save dialog) and **Copy link**. You can also select and copy the read-only URL field manually. The extension requires the `downloads` permission. Moodle URLs may require authentication: if a transcription service cannot access the URL, upload the downloaded file instead. Blob URLs, embedded third-party players and streaming playlists are not supported by this download feature. Nothing is automatically sent to a transcription service.
+
+Click **Edit Context** next to a question to edit the pinned context or the question's shared passage. Paste an audio/video transcript into **Audio / video transcript** and click **Save**. The transcript is appended to the context text and is available for later editing in that text field. Transcription itself is not automatic.
+
+Uncheck **Keep context images** to use only text instead of the context's images. This does not remove media attached directly to the question. **Cancel** or Escape discards edits; **Clear Context** removes the pinned context and restores automatic shared-context selection. Saved context is stored locally and sent to your configured API when requesting an answer.
+
 ## Privacy
 
 Question text, options and attached media are sent to the endpoint you configure. Use only endpoints you trust. Plain `http://` endpoints transmit the API key unencrypted.
@@ -39,3 +47,5 @@ npm run icons     # regenerate PNG icons (requires canvas)
 - `content/content.js`: question detection, buttons, auto-fill.
 - `popup/`: settings UI.
 - `tests/`: `content-dom.test.js` (DOM behaviour), `service-worker.test.js` (API helpers and prompts).
+
+Context audio and video are never automatically inherited, decoded, or uploaded. Paste their transcript into Edit Context manually. Media directly attached to a question is handled separately.

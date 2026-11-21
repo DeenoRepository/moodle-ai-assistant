@@ -5,6 +5,7 @@
   "description": "Uses a configurable OpenAI-compatible API to answer Moodle quiz questions",
   "permissions": [
     "storage",
+    "downloads",
     "offscreen"
   ],
   "host_permissions": [

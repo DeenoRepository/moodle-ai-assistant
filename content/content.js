@@ -272,7 +272,54 @@
       return { text: null, media: [] };
     }
     const legacyMedia = (contextImageUrls || []).map((url) => ({ type: "image", url }));
-    return { text: context || null, media: contextMedia || legacyMedia };
+    return { text: context || null, media: (contextMedia || legacyMedia).filter((m) => m.type === "image") };
+  }
+
+  function updateMediaDownloads(formulation, wrapper) {
+    const media = extractMediaFromElement(formulation).filter((item) => item.type === "audio" || item.type === "video");
+    const signature = JSON.stringify(media.map((item) => item.url));
+    if (wrapper.dataset.mediaSignature === signature) return;
+    wrapper.dataset.mediaSignature = signature;
+    wrapper.querySelector(".moodle-ai-media-downloads")?.remove();
+    if (!media.length) return;
+    const panel = document.createElement("details");
+    panel.className = "moodle-ai-media-downloads";
+    const summary = document.createElement("summary");
+    summary.textContent = `Download audio / video (${media.length})`;
+    panel.appendChild(summary);
+    media.forEach((item, index) => {
+      const row = document.createElement("div");
+      const name = document.createElement("span");
+      name.textContent = `${index + 1}. ${item.type}: ${item.label || new URL(item.url).pathname.split("/").pop() || "media"}`;
+      const link = document.createElement("input");
+      link.type = "url";
+      link.readOnly = true;
+      link.value = item.url;
+      link.setAttribute("aria-label", "Media URL");
+      link.onclick = () => link.select();
+      const status = document.createElement("span");
+      status.setAttribute("role", "status");
+      const download = document.createElement("button");
+      download.type = "button";
+      download.textContent = "Save to PC";
+      download.onclick = async () => {
+        const result = await safeSendMessage({ action: "downloadMedia", url: item.url });
+        status.textContent = result.error || "Download requested. See Chrome Downloads for progress.";
+      };
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "Copy link";
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(item.url); status.textContent = "Link copied."; }
+        catch (_) { link.focus(); link.select(); status.textContent = "Copy the selected URL manually (Ctrl+C)."; }
+      };
+      row.append(name, link, download, copy, status);
+      panel.appendChild(row);
+    });
+    const note = document.createElement("small");
+    note.textContent = "Moodle links may require your login; an external transcription service may need the downloaded file instead. Blob URLs and streaming playlists are not downloadable here.";
+    panel.appendChild(note);
+    wrapper.appendChild(panel);
   }
 
   async function setContext(text, element, media = []) {
@@ -281,10 +328,11 @@
     await chrome.storage.local.set({
       context: text,
       contextUrl: currentUrl,
-      contextMedia: media
+      contextMedia: media.filter((m) => m.type === "image")
     });
+    activeContextEl?.classList.remove("moodle-ai-context-active");
     activeContextEl = element;
-    element.classList.add("moodle-ai-context-active");
+    element?.classList.add("moodle-ai-context-active");
     updateContextButtons();
     updateGlobalContextIndicator();
   }
@@ -359,6 +407,14 @@
     if (hasTextarea) return "Essay";
     if (textInputs.length > 0) return "Short Answer";
     return "Unknown";
+  }
+
+  function getMatchingItemText(select) {
+    const row = select.closest("tr, div, li");
+    if (!row) return "";
+    const item = row.cloneNode(true);
+    item.querySelectorAll("select").forEach((control) => control.remove());
+    return getMathText(item);
   }
 
   // Content scripts run in an isolated world, so Moodle's listeners (on the page's own world) must be
@@ -515,16 +571,13 @@
       const selects = formulation.querySelectorAll("select");
       const pairs = [];
       selects.forEach((select) => {
-        const row = select.closest("tr, div, li");
-        if (row) {
-          const itemText = getMathText(row);
+        const itemText = getMatchingItemText(select);
+        if (itemText) {
           const matches = [];
           select.querySelectorAll("option").forEach((opt) => {
             if (opt.value) matches.push(cleanOptionText(opt.text));
           });
-          if (itemText) {
-            pairs.push({ item: itemText, matches });
-          }
+          pairs.push({ item: itemText, matches });
         }
       });
       data.matchingPairs = pairs;
@@ -771,9 +824,9 @@
       }).filter((pair) => pair && pair.item && pair.match);
 
       formulation.querySelectorAll("select").forEach((select) => {
-        const row = select.closest("tr, div, li");
-        if (!row) return;
-        const bestPair = findBestTextMatch(answerPairs, getMathText(row), (pair) => pair.item);
+        const itemText = getMatchingItemText(select);
+        if (!itemText) return;
+        const bestPair = findBestTextMatch(answerPairs, itemText, (pair) => pair.item);
         if (!bestPair) return;
         const options = [...select.options].filter((option) => option.value);
         const bestOption = findBestTextMatch(options, bestPair.match, (option) => option.text);
@@ -893,13 +946,67 @@
       const questionTextEl = source.querySelector(".qtext, .questiontext, [class*='question-text']");
       const contextText = questionTextEl ? questionTextEl.innerText.trim() : source.innerText.trim();
 
-      const media = [...extractMediaFromElement(source)];
+      const media = extractMediaFromElement(source).filter((m) => m.type === "image");
       if (sharedBlock) {
-        media.push(...extractMediaFromElement(formulation).filter((m) => !media.some((x) => x.url === m.url)));
+        media.push(...extractMediaFromElement(formulation).filter((m) => m.type === "image" && !media.some((x) => x.url === m.url)));
       }
 
       await setContext(contextText, formulation, media);
     }
+  }
+
+  async function openContextEditor(formulation) {
+    document.querySelector(".moodle-ai-context-editor")?.remove();
+    const pinned = await loadContext();
+    const source = findSharedDescription(formulation) || formulation;
+    const initial = pinned.text ? pinned : {
+      text: getAccessibleText(source.querySelector(".qtext, .questiontext") || source),
+      media: extractMediaFromElement(source).filter((m) => m.type === "image"),
+    };
+    const modal = document.createElement("div");
+    modal.className = "moodle-ai-log-modal moodle-ai-context-editor";
+    modal.innerHTML = `
+      <div class="moodle-ai-log-modal-content" role="dialog" aria-modal="true" aria-labelledby="moodle-ai-context-title">
+        <div class="moodle-ai-log-modal-header"><h3 id="moodle-ai-context-title">Edit Context</h3></div>
+        <div class="moodle-ai-log-body">
+          <label>Context text<textarea class="moodle-ai-context-text" rows="8"></textarea></label>
+          <label>Audio / video transcript<textarea class="moodle-ai-context-transcript" rows="6" placeholder="Paste a transcript here (speech recognition is not automatic)"></textarea></label>
+          <label><input type="checkbox" class="moodle-ai-context-keep-media" checked> Keep context images (${initial.media.length})</label>
+          <p>This context will be used for questions on this quiz page, including after page navigation. It is sent to your configured API.</p>
+          <p class="moodle-ai-context-error" role="alert"></p>
+          <button type="button" class="moodle-ai-btn moodle-ai-context-save">Save</button>
+          <button type="button" class="moodle-ai-btn moodle-ai-context-cancel">Cancel</button>
+          <button type="button" class="moodle-ai-btn moodle-ai-context-clear">Clear Context</button>
+        </div>
+      </div>`;
+    const text = modal.querySelector(".moodle-ai-context-text");
+    text.value = initial.text || "";
+    const close = () => {
+      modal.remove();
+      document.removeEventListener("keydown", onKey);
+    };
+    const onKey = (event) => { if (event.key === "Escape") close(); };
+    modal.querySelector(".moodle-ai-context-cancel").onclick = close;
+    modal.onclick = (event) => { if (event.target === modal) close(); };
+    modal.querySelector(".moodle-ai-context-clear").onclick = async () => {
+      try { await clearContext(); close(); }
+      catch (error) { modal.querySelector(".moodle-ai-context-error").textContent = error.message; }
+    };
+    modal.querySelector(".moodle-ai-context-save").onclick = async () => {
+      const transcript = modal.querySelector(".moodle-ai-context-transcript").value.trim();
+      const combined = [text.value.trim(), transcript ? `Audio / video transcript:\n${transcript}` : ""].filter(Boolean).join("\n\n");
+      if (!combined) {
+        modal.querySelector(".moodle-ai-context-error").textContent = "Enter context text or a transcript, or use Clear Context.";
+        return;
+      }
+      try {
+        await setContext(combined, formulation, modal.querySelector(".moodle-ai-context-keep-media").checked ? initial.media : []);
+        close();
+      } catch (error) { modal.querySelector(".moodle-ai-context-error").textContent = error.message; }
+    };
+    document.body.appendChild(modal);
+    document.addEventListener("keydown", onKey);
+    text.focus();
   }
 
   async function handleAnswerClick(e) {
@@ -926,20 +1033,12 @@
     return null;
   }
 
-  // Shared listening/video material sits in an earlier "description" block of the same quiz form.
-  // Both audio and video must reach the model, so any playable media counts as shared.
-  function findSharedMedia(formulation) {
-    const que = formulation.closest(".que");
-    if (!que) return null;
-    let previous = que.previousElementSibling;
-    while (previous) {
-      if (previous.classList.contains("que")) {
-        const shared = extractMediaFromElement(previous).filter((m) => m.type === "audio" || m.type === "video");
-        if (shared.length > 0) return shared;
-      }
-      previous = previous.previousElementSibling;
-    }
-    return null;
+  function getSharedContextData(formulation) {
+    const sharedBlock = findSharedDescription(formulation);
+    if (!sharedBlock) return { text: null, media: [] };
+    const questionTextEl = sharedBlock.querySelector(".qtext, .questiontext, [class*='question-text']");
+    const text = (questionTextEl ? questionTextEl.innerText : sharedBlock.innerText).trim();
+    return { text: text || null, media: extractMediaFromElement(sharedBlock).filter((m) => m.type === "image") };
   }
 
   async function answerFormulation(formulation, btn, options = {}) {
@@ -952,13 +1051,7 @@
     const pinned = await loadContext();
     const contextData = pinned.text
       ? pinned
-      : { text: null, media: [] };
-    // Shared audio or video often sits in an earlier "description" block of the same quiz form,
-    // so questions without their own playable media inherit it from the nearest preceding block that has one.
-    if (!questionData.media.some((m) => m.type === "audio" || m.type === "video")) {
-      const sharedMedia = findSharedMedia(formulation);
-      if (sharedMedia) questionData.media.push(...sharedMedia);
-    }
+      : getSharedContextData(formulation);
     const sessionId = getSessionId();
 
     let answerDiv = formulation.querySelector(".moodle-ai-answer");
@@ -1143,13 +1236,25 @@
     );
 
     formulations.forEach((formulation) => {
-      if (formulation.querySelector(".moodle-ai-btn-wrapper")) return;
+      const existingWrapper = formulation.querySelector(".moodle-ai-btn-wrapper");
+      if (existingWrapper) {
+        updateMediaDownloads(formulation, existingWrapper);
+        return;
+      }
 
       const header = formulation.querySelector(
         ".qtext, .questiontext, .header, h3, h4, [class*='question-header']"
       );
 
       const { wrapper } = createButtons();
+
+      const editContext = document.createElement("button");
+      editContext.type = "button";
+      editContext.className = "moodle-ai-btn moodle-ai-context-edit-btn";
+      editContext.textContent = "Edit Context";
+      editContext.onclick = () => openContextEditor(formulation).catch((error) => console.warn("Failed to open context editor:", error));
+      wrapper.appendChild(editContext);
+      updateMediaDownloads(formulation, wrapper);
 
       if (header) {
         header.insertAdjacentElement("afterend", wrapper);

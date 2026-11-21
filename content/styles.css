@@ -5,6 +5,28 @@
   margin: 8px 0;
 }
 
+.moodle-ai-context-editor textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 6px 0 16px;
+  padding: 8px;
+  border: 1px solid #adb5bd;
+  border-radius: 4px;
+  color: #202124;
+  background: #fff;
+  font: inherit;
+  resize: vertical;
+}
+
+.moodle-ai-context-error { color: #b3261e; }
+
+.moodle-ai-media-downloads { flex-basis: 100%; padding: 8px; border: 1px solid #dadce0; border-radius: 6px; }
+.moodle-ai-media-downloads summary { cursor: pointer; }
+.moodle-ai-media-downloads > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+.moodle-ai-media-downloads input { flex: 1; min-width: 180px; }
+.moodle-ai-media-downloads small { display: block; }
+
 .moodle-ai-btn {
   display: inline-flex;
   align-items: center;

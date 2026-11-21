@@ -3,7 +3,7 @@ const { JSDOM } = require("jsdom");
 
 const contentScript = fs.readFileSync("./content/content.js", "utf8").replace(
   "  const observer = new MutationObserver((mutations) => {",
-  "  window.__moodleAiTest = { detectQuestionType, extractQuestionData, autoFillAnswer, extractMediaFromElement, findNextPageButton, findSharedMedia, findSharedDescription };\n\n  const observer = new MutationObserver((mutations) => {"
+  "  window.__moodleAiTest = { detectQuestionType, extractQuestionData, autoFillAnswer, extractMediaFromElement, findNextPageButton, findSharedDescription, getSharedContextData };\n\n  const observer = new MutationObserver((mutations) => {"
 );
 
 function createDom(html) {
@@ -226,14 +226,14 @@ test("shared passage split into shortanswer questions gets its own numbered line
   assertEqual(doc.querySelector("input[name='a2']").value, "Side mirrors", "blank 2 gets line 2");
 });
 
-test("question without its own audio inherits audio from the preceding description block", () => {
+test("context audio is excluded from the preceding description block", () => {
   const dom = createDom(`<div class="que description"><div class="formulation clearfix"><div class="qtext"><audio src="/clip.mp3"></audio></div></div></div><div class="que shortanswer"><div class="formulation clearfix"><div class="qtext">but (1) ___ the windshield.</div><input type="text" name="a1" /></div></div>`);
   const api = dom.window.__moodleAiTest;
   const formulation = dom.window.document.querySelectorAll(".formulation")[1];
   const own = api.extractQuestionData(formulation).media.filter((m) => m.type === "audio");
   assertEqual(own.length, 0, "question has no audio of its own");
-  const shared = api.findSharedMedia(formulation);
-  assertEqual(!!shared && shared.length === 1 && shared[0].type === "audio", true, "audio found in the description block");
+  const shared = api.getSharedContextData(formulation).media;
+  assertEqual(shared.length, 0, "context audio is not inherited");
 });
 
 test("pinned context for a blank question uses the full dialogue from the description block", () => {
@@ -368,12 +368,29 @@ test("Matching answers written as 'Item: match' without spaces around the colon 
   assertEqual(chosen.join("|"), pairs.map(([, match]) => match).join("|"), "every dropdown gets its match");
 });
 
-test("video in an earlier description block is shared with following multichoice questions", () => {
+test("Matching item text excludes dropdown options", () => {
+  const options = `<option value="">Choose...</option><option value="1">двигатель</option><option value="2">колесо</option>`;
+  const dom = createDom(`<div class="que match"><div class="formulation"><table class="answer"><tr><td class="text">Engine</td><td class="control"><select>${options}</select></td></tr><tr><td class="text">Wheel</td><td class="control"><select>${options}</select></td></tr></table></div></div>`);
+  const api = dom.window.__moodleAiTest;
+  const formulation = dom.window.document.querySelector(".formulation");
+  const data = api.extractQuestionData(formulation);
+  assertEqual(data.matchingPairs[0].item, "Engine", "item contains only its own text");
+  assertEqual(data.matchingPairs[0].matches.join("|"), "двигатель|колесо", "dropdown options remain available as matches");
+});
+
+test("context video is not shared with following multichoice questions", () => {
   const dom = createDom(`<div class="que description"><div class="formulation clearfix"><div class="qtext"><p>Watch the video.</p><video><source src="/pluginfile.php/clip.mp4" type="video/mp4" /></video></div></div></div><div class="que multichoice"><div class="formulation clearfix"><div class="qtext">Which statement is true?</div><div class="answer"><div class="r0"><input type="radio" name="q" id="a" /><label for="a">A</label></div><div class="r1"><input type="radio" name="q" id="b" /><label for="b">B</label></div></div></div></div>`);
   const api = dom.window.__moodleAiTest;
   const formulation = dom.window.document.querySelector(".que.multichoice .formulation");
-  const shared = api.findSharedMedia(formulation);
-  assertEqual(!!shared && shared.some((m) => m.type === "video"), true, "video from the description is inherited");
+  const shared = api.getSharedContextData(formulation).media;
+  assertEqual(shared.length, 0, "context video is not inherited");
+});
+
+test("preceding description text is inherited as automatic question context", () => {
+  const dom = createDom(`<div class="que description"><div class="formulation"><div class="qtext">Read this passage before answering.</div></div></div><div class="que truefalse"><div class="formulation"><div class="qtext">The statement is correct.</div><input type="radio" id="t"><label for="t">True</label><input type="radio" id="f"><label for="f">False</label></div></div>`);
+  const formulation = dom.window.document.querySelector(".que.truefalse .formulation");
+  const context = dom.window.__moodleAiTest.getSharedContextData(formulation);
+  assertEqual(context.text, "Read this passage before answering.", "shared description text");
 });
 
 test("auto-answer never clicks a Finish attempt button even though it is named next", () => {
@@ -381,6 +398,49 @@ test("auto-answer never clicks a Finish attempt button even though it is named n
   assertEqual(finish.window.__moodleAiTest.findNextPageButton(), null, "finish button rejected");
   const nextRu = createDom(`<form><input type="submit" name="next" value="Следующая страница"></form>`);
   assertEqual(!!nextRu.window.__moodleAiTest.findNextPageButton(), true, "Russian next button accepted");
+});
+
+test("context editor saves a transcript as text and Cancel preserves storage", async () => {
+  const dom = createDom(`<div class="que"><div class="formulation"><div class="qtext">Original passage</div></div></div>`);
+  const storage = {};
+  dom.window.chrome.storage.local.get = async () => ({ ...storage });
+  dom.window.chrome.storage.local.set = async (values) => Object.assign(storage, values);
+  dom.window.chrome.storage.local.remove = async (keys) => keys.forEach((key) => delete storage[key]);
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const doc = dom.window.document;
+  doc.querySelector(".moodle-ai-context-edit-btn").click();
+  await tick();
+  assertEqual(doc.querySelector(".moodle-ai-context-text").value, "Original passage", "initial context");
+  doc.querySelector(".moodle-ai-context-transcript").value = "Speaker: Sample transcript.";
+  doc.querySelector(".moodle-ai-context-keep-media").checked = false;
+  doc.querySelector(".moodle-ai-context-save").click();
+  await tick();
+  assertEqual(storage.context, "Original passage\n\nAudio / video transcript:\nSpeaker: Sample transcript.", "saved combined context");
+  assertEqual(storage.contextMedia.length, 0, "text-only context");
+  assertEqual(!!doc.querySelector(".moodle-ai-context-editor"), false, "editor closed");
+  doc.querySelector(".moodle-ai-context-edit-btn").click();
+  await tick();
+  assertEqual(doc.querySelector(".moodle-ai-context-text").value, storage.context, "saved text restored");
+  doc.querySelector(".moodle-ai-context-text").value = "Discard this";
+  doc.querySelector(".moodle-ai-context-cancel").click();
+  assertEqual(storage.context.includes("Discard this"), false, "cancel does not save");
+  dom.window.close();
+});
+
+test("media download controls expose direct links without changing question type", async () => {
+  const dom = createDom(`<div class="que description"><div class="formulation"><div class="qtext">Watch this clip</div><video><source src="/pluginfile.php/sample.mp4" type="video/mp4"></video></div></div>`);
+  const doc = dom.window.document;
+  const panel = doc.querySelector(".moodle-ai-media-downloads");
+  assertEqual(!!panel, true, "download panel exists");
+  assertEqual(panel.querySelector("input").value, "https://moodle.example/pluginfile.php/sample.mp4", "absolute media URL");
+  let sent;
+  dom.window.chrome.runtime.sendMessage = (message, callback) => { sent = message; callback({ downloadId: 1 }); };
+  panel.querySelector("button").click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assertEqual(sent.action, "downloadMedia", "download message");
+  assertEqual(sent.url, panel.querySelector("input").value, "download URL");
+  assertEqual(dom.window.__moodleAiTest.detectQuestionType(doc.querySelector(".formulation")), "Unknown", "UI does not add answer inputs");
+  dom.window.close();
 });
 
 let failures = 0;

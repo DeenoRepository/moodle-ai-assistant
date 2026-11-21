@@ -5,6 +5,10 @@ const MAX_VIDEO_BYTES = 80 * 1024 * 1024;
 const MAX_MEDIA_ITEMS_PER_REQUEST = 8;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "downloadMedia") {
+    downloadMedia(request.url).then(sendResponse);
+    return true;
+  }
   if (request.action === "getAnswer") {
     const legacyQuestionMedia = (request.questionImageUrls || []).map((url) => ({ type: "image", url }));
     const legacyContextMedia = (request.contextImageUrls || []).map((url) => ({ type: "image", url }));
@@ -30,6 +34,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 });
+
+async function downloadMedia(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (!["https:", "http:"].includes(url.protocol)) {
+      throw new Error("Only direct HTTP/HTTPS media links can be downloaded. Blob URLs and streaming playlists are not supported.");
+    }
+    const downloadId = await chrome.downloads.download({ url: url.href, saveAs: true });
+    return { downloadId };
+  } catch (error) {
+    return { error: error.message };
+  }
+}
 
 async function fetchMediaAsBase64(media) {
   try {
@@ -131,6 +148,8 @@ async function handleGetAnswer(question, questionMediaItems, context, contextMed
     return { error: "Model not set. Please configure it in the extension popup." };
   }
 
+  // Context audio/video is supplied manually as transcript text, never decoded or uploaded.
+  contextMediaItems = (contextMediaItems || []).filter((media) => media.type === "image");
   const history = await getOrCreateHistory(sessionId, context, contextMediaItems);
   const isFirstMessage = history.messages.length === 0;
   const questionMedia = await loadMedia(questionMediaItems);
